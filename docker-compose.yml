@@ -4,6 +4,7 @@ services:
   # Represents physical camera rigs (ports 7001-7012) and remote cloud (port 7100)
   # ----------------------------------------------------------------------------
   simulator:
+    image: peripheral-gateway:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -25,6 +26,7 @@ services:
   # STRICT CONSTRAINTS: 1 CPU core, 250 MB RAM, zero swap headroom
   # ----------------------------------------------------------------------------
   gateway:
+    image: peripheral-gateway:latest
     build:
       context: .
       dockerfile: Dockerfile
