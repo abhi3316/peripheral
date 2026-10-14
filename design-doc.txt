@@ -1156,15 +1156,31 @@ Docker Compose architecture (docker-compose.yml) that strictly enforces the
 assignment limits using Linux cgroups v2.
 
 Architecture & Services:
-- Container 1 (peripheral-simulator):
-  Runs camera and cloud storage simulators with network binding on 0.0.0.0.
-  Exposes ports 7001-7002 (cam0), 7011-7012 (cam1), 7000/7010 (admin), and 7100 (cloud).
-- Container 2 (peripheral-gateway):
-  Runs the C++26 peripheral_server under hard cgroup resource limits:
-  * cpus: 1.0 (enforces 1 physical core ceiling).
-  * mem_limit: 250m (enforces 250 MB physical RAM limit).
-  * memswap_limit: 250m (swap disabled to guarantee physical RAM compliance).
-  * Mounts host directory ./record to /app/record for zero-loss chunk persistence.
+- Unified Single Docker Image (peripheral-gateway:latest):
+  Only ONE Docker image is built or downloaded. It packages the compiled C++26
+  gateway binary, the Node.js 22 runtime, the official camera simulator, the cloud
+  storage simulator, and the production React operator viewer. Both containers
+  below instantiate this exact same image with different entrypoints.
+
+- Why Two Containers Instead of One? (Resource Isolation Compliance):
+  The project specification explicitly states:
+    "1 CPU core, 250 MB RAM, and 2 GB disk. The memory limit covers everything
+     your server's processes use (exclude simulation tools)."
+  Node.js and the two simulated cameras require ~200 MB of RAM to run. If both
+  the Node.js simulator and the C++ gateway ran inside the same container under
+  a 250 MB cgroup limit, the Node.js runtime would starve the C++ server,
+  triggering false Linux kernel OOM kills.
+  By separating them into two containers on a shared Docker bridge network:
+  1. Container 1 (peripheral-simulator):
+     Runs camera and cloud storage simulators with network binding on 0.0.0.0.
+     Exposes ports 7001-7002 (cam0), 7011-7012 (cam1), 7000/7010 (admin), and 7100 (cloud).
+     Runs unconstrained to faithfully mimic physical Ethernet camera hardware.
+  2. Container 2 (peripheral-gateway):
+     Runs the C++26 peripheral_server under hard cgroup resource limits:
+     * cpus: 1.0 (enforces 1 physical core ceiling).
+     * mem_limit: 250m (enforces 250 MB physical RAM limit).
+     * memswap_limit: 250m (swap disabled to guarantee physical RAM compliance).
+     * Mounts host directory ./record to /app/record for zero-loss chunk persistence.
 
 Step-by-Step Instructions to Run Docker on Your Computer:
 
@@ -1236,18 +1252,31 @@ Expected Output:
 Step 2: Verify the loaded image:
   docker images | grep peripheral-gateway
 
+  Note on Container Spawning:
+  Both the "simulator" and "gateway" services in docker-compose.yml use this exact
+  loaded image (peripheral-gateway:latest). There is no separate simulator image.
+
+  Troubleshooting "no such image" or rebuild attempts:
+  - If you previously stopped or pruned Docker images, remove stale container metadata:
+      docker rm -f peripheral-simulator peripheral-gateway
+      docker compose down -v
+  - To ensure Compose finds the image regardless of service name aliasing, tag it:
+      docker tag peripheral-gateway:latest peripheral-simulator:latest
+
 Step 3: Launch the Stack with the Pre-Built Image
-Since docker-compose.yml targets peripheral-gateway:latest, launch without --build:
+Since docker-compose.yml targets peripheral-gateway:latest, launch WITHOUT --build:
   # Run in interactive foreground mode:
   docker compose up
 
   # Or run in detached background mode:
   docker compose up -d
 
-Alternatively, run the gateway container directly:
+  (IMPORTANT: Do NOT pass `--build`; passing `--build` forces Docker to recompile from source).
+
+Alternatively, run the complete stack directly in a single container without Compose:
   docker run --rm -it \
     --cpus=1.0 -m 250m \
-    -p 8080:8080 \
+    -p 8080:8080 -p 5173:5173 -p 7000-7012:7000-7012 -p 7100:7100 \
     -v "$(pwd)/record:/app/record" \
     peripheral-gateway:latest
 

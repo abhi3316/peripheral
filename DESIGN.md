@@ -72,10 +72,16 @@ Under a **250 MB total RAM ceiling**, dynamic allocations (`malloc`/`new`) 50 ti
 | **Atomic Event Ring Buffer** | **0.1 MB** | 0.04% | 256 preallocated POD event slots for lock-free logging |
 | **TCP Socket Buffers** | **8.0 MB** | 3.2% | 4 streams $\times$ 2 MB `SO_RCVBUF` kernel buffers |
 | **Server Binary & Stacks** | **6.0 MB** | 2.4% | C++26 code segment, static constants, 8 thread stacks |
-| **Embedded Web Server & Cache** | **4.0 MB** | 1.6% | HTTP server, REST JSON serialization, static bundle |
+| **Embedded Web Server & Cache** | **4.0 MB** | 1.6% | Total memory for HTTP serving and live previews |
+| ├── *Single-Slot Preview Buffer (2 cams)* | *0.13 MB* | *0.05%* | *Overwrites in-place: $2 \times 320 \times 200 \times 1\text{B} = 128\text{ KB}$* |
+| ├── *Compiled React UI Assets (Dist)* | *3.20 MB* | *1.28%* | *HTML, JS bundles, CSS, and SVGs cached in memory* |
+| └── *HTTP Client Sockets & Parse Buffers* | *0.67 MB* | *0.27%* | *Active HTTP client connections and 4 KB stack buffers* |
 | **Kernel Page Cache (Dirty I/O)**| **150.0 MB** | 60.0% | Linux OS buffer cache for sustained 31.25 MB/s disk I/O |
 | **Safety Headroom** | **41.3 MB** | 16.5% | Headroom against transient memory spikes |
 | **TOTAL HARD CEILING** | **250.0 MB** | **100.0%** | **Strictly enforced via Docker cgroups v2** |
+
+#### Web Preview Buffer Architectural Sizing:
+Under full 250 Mb/s (31.25 MB/s) ingress, an unbounded multi-frame web queue would exhaust the 250 MB RAM budget in $<8\text{ seconds}$. To guarantee deterministic safety, the Web Server maintains exactly one 64 KB slot per camera (320×200 greyscale, 128 KB combined across `cam0` and `cam1`). Incoming frames overwrite this single slot in-place; slow or disconnected browser clients drop unread previews with zero memory accumulation.
 
 ### 2.4 Why Exactly 32 Slots per Camera?
 
@@ -408,19 +414,27 @@ This orchestrates the C++ server, dual-camera simulator, cloud storage simulator
 
 ## 5. Docker Deployment Under Strict Constraints (1 CPU, 250 MB RAM)
 
-The production Docker setup in [docker-compose.yml](file:///Users/achu/Jobs/peripheral/docker-compose.yml) enforces the hardware limits:
+### 5.1 Unified Single-Image, Dual-Container Architecture
+* **Single Docker Image (`peripheral-gateway:latest`)**: Only one image is built or downloaded. It packages the compiled C++26 gateway server, the Node.js 22 runtime, the official camera simulator, cloud storage, and the React operator UI.
+* **Why Two Containers Instead of One?**: The assignment enforces a strict limit: **1 CPU core and 250 MB RAM, excluding simulation tools**. Node.js and the two simulated cameras require ~200 MB of RAM. If run in the same container, the Node.js runtime would starve the C++ server and trigger false OOM kills. Spawning two containers from the single image ensures `peripheral-gateway` is strictly capped at 250 MB RAM while `peripheral-simulator` runs unconstrained as the external world.
+
+The production Docker Compose setup in [docker-compose.yml](file:///Users/achu/Jobs/peripheral/docker-compose.yml) enforces these limits:
 
 ```yaml
 services:
   simulator:
+    image: peripheral-gateway:latest
     build: .
+    container_name: peripheral-simulator
     entrypoint: ["sh", "-c", "(cd utils/tools && npm run camera -- --host 0.0.0.0) & (cd utils/tools && npm run storage -- --host 0.0.0.0) & wait"]
-    ports: ["7001-7002:7001-7002", "7011-7012:7011-7012", "7100-7101:7100-7101"]
+    ports: ["7001-7002:7001-7002", "7011-7012:7011-7012", "7100-7101:7100-7101", "7000:7000", "7010:7010"]
 
   gateway:
+    image: peripheral-gateway:latest
     build: .
+    container_name: peripheral-gateway
     entrypoint: ["./build/peripheral_server"]
-    command: ["--cam-host", "simulator", "--storage-host", "simulator"]
+    command: ["--cam-host", "simulator", "--storage-host", "simulator", "--log-level", "info"]
     ports: ["8080:8080"]
     volumes: ["./record:/app/record"]
     cpus: 1.0
@@ -433,19 +447,25 @@ services:
           memory: 250M
 ```
 
-### Launch and Verify:
-```bash
-# Start containerized deployment
-docker compose up -d
+### 5.2 Running the Pre-Built GitHub Image (`.tar` / `.tar.gz`)
+When using the pre-compiled container artifact from GitHub Actions, no local compilation is required:
 
-# Verify real-time resource consumption
-docker stats --no-stream
+```bash
+# 1. Load the image into Docker
+docker load -i peripheral-gateway-docker.tar.gz  # or .tar
+
+# 2. Start the stack (WITHOUT --build to prevent recompiling)
+docker compose up
+
+# (Troubleshooting: if stale containers exist from previous runs, clean them with:
+#  docker rm -f peripheral-simulator peripheral-gateway && docker compose up --no-build)
 ```
 
-### Verified Benchmark Output:
+### 5.3 Verified Benchmark Output:
 ```
 CONTAINER ID   NAME                 CPU %     MEM USAGE / LIMIT     MEM %     NET I/O
 774b0e9ca391   peripheral-gateway   25.89%    46.68MiB / 250MiB     18.67%    834MB / 655kB
+2a1fba2208e6   peripheral-simulator 16.30%    212MiB / 3.8GiB        5.40%    634kB / 802MB
 ```
 
 * **RAM Footprint**: **46.7 – 49.0 MiB** (Only **~19%** of the 250 MiB limit!).
