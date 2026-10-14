@@ -86,23 +86,21 @@ The project follows a subsystem/component-based architecture under `include/peri
 
 **Rule:** NEVER use `scripts/virtual_camera.py`. ALWAYS utilize the official simulator in `utils/tools`.
 
-### 1. Starting the Official Camera Simulator
-Run from `utils/tools`:
+### 1. One-Shot Runner (`./run.sh` — Recommended)
+Run the entire stack (simulator, server, viewer) with a single command from root:
 ```bash
-cd /Users/achu/Jobs/peripheral/utils/tools
-npm run camera
+./run.sh
 ```
-- Starts `cam0` (ctrl: 7001, video: 7002, admin: 7000) and `cam1` (ctrl: 7011, video: 7012, admin: 7010).
+- Automatically builds the C++ server and compiles the React viewer bundle.
+- Starts the official simulator (`utils/tools`), gateway server (`:8080`), and React viewer (`:5173`).
+- Passes through any server CLI flags (e.g. `./run.sh --timeout-ms 5000` or `./run.sh --pool-mb 48`).
+- Cleans up all child processes gracefully on `Ctrl+C`.
 
-### 2. Starting the Peripheral Gateway Server
-Run from workspace root:
-```bash
-cd /Users/achu/Jobs/peripheral
-./build/peripheral_server
-```
-- Available CLI flags:
-  - `--pool-mb <N>`: Configure memory pool size (default: 40.625 MB for 64 slots).
-  - `--timeout-ms <N>`: Run for $N$ milliseconds and gracefully shut down (useful for testing).
+### 2. Manual Startup Procedure
+If running components individually in separate terminals:
+- **Simulator**: `cd utils/tools && npm run camera`
+- **Server**: `./build/peripheral_server`
+- **Viewer**: `cd utils/viewer && npm run dev` (or open `http://localhost:8080/` for built bundle)
 
 ### 3. Monitoring Time & Clock Sync Telemetry
 - **Terminal Console Heartbeat**: Logs every second:

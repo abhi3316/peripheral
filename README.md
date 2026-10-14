@@ -159,9 +159,23 @@ peripheral/
 
 ---
 
-## Viewing and Recording with the Official Operator Viewer
+## Running the Complete Stack
 
-### Step 1: Start the Official Camera Simulator
+### Quickstart: One-Shot Runner (`./run.sh`)
+Run everything (simulator, gateway server, and operator viewer) with a single command:
+```bash
+./run.sh
+```
+This builds the C++ binaries, prepares the viewer, spawns all background services, and opens:
+* **Operator Viewer (Dev)**: `http://localhost:5173/`
+* **Operator Viewer (Production)**: `http://localhost:8080/`
+* Press `Ctrl+C` to cleanly stop all services.
+
+---
+
+### Alternative: Step-by-Step Manual Startup
+
+#### Step 1: Start the Official Camera Simulator
 Run the official simulator from `utils/tools`:
 ```bash
 cd utils/tools && npm run camera
@@ -170,7 +184,7 @@ This spawns:
 - `cam0`: Control `:7001`, Video `:7002`, Admin `http://127.0.0.1:7000/admin/stats`
 - `cam1`: Control `:7011`, Video `:7012`, Admin `http://127.0.0.1:7010/admin/stats`
 
-### Step 2: Build and Start the Gateway Server
+#### Step 2: Build and Start the Gateway Server
 In another terminal, build and run `peripheral_server`:
 ```bash
 cmake -B build
@@ -178,7 +192,7 @@ cmake --build build
 ./build/peripheral_server
 ```
 
-### Step 3: Open the Official Viewer
+#### Step 3: Open the Official Viewer
 Run the Vite development server in `utils/viewer`:
 ```bash
 cd utils/viewer
