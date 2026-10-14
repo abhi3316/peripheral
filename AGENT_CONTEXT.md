@@ -43,7 +43,11 @@ The project follows a subsystem/component-based architecture under `include/peri
   - Zero-heap allocation writes: Writes wire `VideoFrameHeader` (32 bytes) + frame payload directly from preallocated pool slots.
   - Gap tracking: Monitors frame sequence jumps, corrupt frames, socket disconnects, and disk full limits (`dropped_by_camera`, `damaged`, `link_down`, `disk_full`).
   - Manifest generation: Writes crash-safe `manifest.json` on start and finalizes on stop.
-  - Quota enforcement: Enforces 2 GB disk quota and reports real-time write rate and used bytes.
+  - Quota enforcement & Automatic Reclamation:
+    - Enforces 2 GB strict disk quota with configurable high-watermark thresholds (`reclamation_threshold_bytes` = 1.6 GB / 80%, `emergency_quota_bytes` = 1.9 GB / 95%).
+    - Automatic reclamation: When crossing 1.6 GB, identifies historical sessions where chunks are confirmed uploaded (`.uploaded` receipt marker), evicts binary chunks (`part-XXXX.bin`) starting with oldest sessions, while preserving `manifest.json` and `.uploaded` markers for cloud sync state integrity.
+    - Active chunk protection: Skips the currently written chunk in the active session during reclamation.
+    - Emergency quota protection: If usage exceeds 1.9 GB without uploaded chunks to evict, safely records `disk_full` gap accounting rather than corrupting active chunks.
 - `cloud_uploader.hpp` / `cloud_uploader.cc`: High-performance background cloud storage uplink worker:
   - Target: Mock cloud object storage on port 7100 (`PUT /v1/servers/peripheral-1/objects/{rec_id}/{chunk_id}`).
   - Non-blocking FIFO work queue with condition-variable background processing thread.
@@ -83,7 +87,7 @@ The project follows a subsystem/component-based architecture under `include/peri
   - `test_framers`: Video and control framing and garbage recovery tests.
   - `test_frame_pool`: Slab pool sizing, partitioning, intrusive handle ref-counting, and zero-allocation framer tests.
   - `test_time_sync`: PTP 4-timestamp clock offset/delay, 32-bit roll-over, jitter rejection, and 200 Hz pose interpolator unit tests.
-  - `test_disk_recorder`: Unit tests for dual-camera chunking, gap detection, and manifest persistence.
+  - `test_disk_recorder`: Unit tests for dual-camera chunking, gap detection, manifest persistence, automatic 80% disk reclamation, unuploaded chunk protection, and 95% emergency quota gap accounting.
   - `test_cloud_uploader`: Unit tests for streaming SHA-256 calculation, HTTP PUT object upload, and backlog telemetry.
   - `test_offline_capture`: Offline capture dataset validation suite benchmarking clock recovery (<100 µs), pose interpolation (<0.1°), 100% frame fate precision, and all 6 milestone events against `utils/data/capture/`.
   - `FunctionalCameraTest` (`tests/test_functional_camera.py`): End-to-end Python functional test suite.

@@ -39,8 +39,10 @@ struct RecordingSummary {
 
 struct DiskRecorderConfig {
     std::filesystem::path root_dir{"record"};
-    uint64_t chunk_max_bytes{10 * 1024 * 1024}; // ~10 MB per chunk
-    uint64_t disk_quota_bytes{2000000000ULL};    // 2 GB quota
+    uint64_t chunk_max_bytes{10 * 1024 * 1024};          // ~10 MB per chunk
+    uint64_t disk_quota_bytes{2000000000ULL};             // 2 GB quota
+    uint64_t reclamation_threshold_bytes{1600000000ULL};  // 1.6 GB (80% of quota)
+    uint64_t emergency_quota_bytes{1900000000ULL};        // 1.9 GB (95% of quota)
 };
 
 class DiskRecorder {
@@ -90,16 +92,39 @@ public:
         return config_.disk_quota_bytes;
     }
 
+    /// Reclaim disk space by evicting uploaded chunks from historical recording sessions
+    /// when total usage exceeds reclamation_threshold_bytes (80% / 1.6 GB).
+    /// Returns total bytes freed.
+    uint64_t reclaim_disk_space();
+
+    /// Cumulative bytes reclaimed across all evictions
+    [[nodiscard]] uint64_t total_bytes_reclaimed() const noexcept {
+        return total_bytes_reclaimed_;
+    }
+
+    /// Threshold at which reclamation starts (e.g. 1.6 GB)
+    [[nodiscard]] uint64_t reclamation_threshold_bytes() const noexcept {
+        return config_.reclamation_threshold_bytes;
+    }
+
+    /// Emergency threshold at which frames are dropped to prevent disk corruption (e.g. 1.9 GB)
+    [[nodiscard]] uint64_t emergency_quota_bytes() const noexcept {
+        return config_.emergency_quota_bytes;
+    }
+
 private:
     void open_next_chunk_locked();
     void close_current_chunk_locked();
     void write_manifest_locked();
     void scan_existing_recordings();
     std::string determine_upload_status(const std::filesystem::path& rec_dir) const;
+    uint64_t reclaim_disk_space_locked();
+    uint64_t total_disk_used_bytes_locked() const;
 
     DiskRecorderConfig config_;
     mutable std::mutex mutex_;
     CloudUploader* uploader_{nullptr};
+    uint64_t total_bytes_reclaimed_{0};
 
     bool is_recording_{false};
     RecordingSummary current_rec_{};

@@ -23,7 +23,7 @@ This document outlines the architectural status of the **Peripheral Camera Gatew
 | **Cloud Storage Uplink Worker** | **Complete** | Background worker streaming completed chunks to port 7100 with SHA-256 and retries |
 | **Offline Capture Dataset Validation** | **Complete** | Replay harness against `utils/data/capture/` verifying sequence, pose, and fate matching |
 | **Live Alarms & Event Log Streaming** | **Pending** | Populating `alarms` and `events` arrays in `/api/state` for viewer alerts |
-| **Automatic Local Disk Pruning** | **Pending** | Pruning confirmed uploaded chunks when approaching the 2 GB disk quota |
+| **Automatic Local Disk Pruning** | **Complete** | Prunes confirmed uploaded chunks at 80% threshold (1.6 GB) while preserving manifests, safe gap accounting at 95% quota |
 | **GitHub Actions CI/CD Pipeline** | **Complete** | Automated multi-platform builds, unit tests, and artifact uploads on push / manual dispatch |
 
 ---
@@ -102,16 +102,22 @@ This document outlines the architectural status of the **Peripheral Camera Gatew
 
 ---
 
-### 4. Automatic Local Disk Reclamation Policy
+### 4. Automatic Local Disk Reclamation Policy (`src/storage/disk_recorder.cc`)
+**Status**: **COMPLETE** (Implemented in `src/storage/disk_recorder.cc`, `include/peripheral/storage/disk_recorder.hpp`, tested in `tests/test_disk_recorder.cc`).
 **Objective**: Ensure the gateway never exceeds the 2 GB local disk limit under continuous recording.
 
-- [ ] **Eviction Logic**:
-  - Monitor total disk usage in `record/`.
-  - When usage crosses 1.6 GB (80% of quota):
-    - Identify historical recording sessions where `upload == "uploaded"`.
-    - Delete verified binary chunks starting with the oldest session, keeping `manifest.json` intact.
-  - If usage crosses 1.9 GB (95% of quota) and unuploaded chunks cannot be cleared:
+- [x] **Eviction Logic**:
+  - Monitor total disk usage in `record/` with `total_disk_used_bytes()`.
+  - When usage crosses 1.6 GB (80% of quota / `reclamation_threshold_bytes`):
+    - Identify historical recording sessions where `.bin.uploaded` receipt markers exist.
+    - Delete verified binary chunks starting with the oldest session, keeping `manifest.json` and `.uploaded` receipt markers intact.
+    - Updated `determine_upload_status()` to inspect resident `.bin` and evicted `.bin.uploaded` files to maintain accurate upload status (`uploaded`, `partial`, `pending`).
+    - Explicitly protected active chunk currently being written to prevent race conditions during continuous capture.
+  - If usage crosses 1.9 GB (95% of quota / `emergency_quota_bytes`) and unuploaded chunks cannot be cleared:
     - Safely trigger `disk_full` gap accounting rather than corrupting active chunk files.
+- [x] **Unit & Stress Validation**:
+  - `test_disk_reclamation_policy()`: Validates 80% watermark trigger, ensures unuploaded chunks are never deleted, confirms deletion of uploaded chunks, and verifies preservation of receipt markers and manifest.
+  - `test_emergency_disk_full_gap_accounting()`: Validates that frames exceeding emergency quota are gracefully rejected with a recorded `disk_full` gap.
 
 ---
 

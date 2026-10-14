@@ -1,7 +1,9 @@
 #include "peripheral/storage/disk_recorder.hpp"
 #include "peripheral/storage/cloud_uploader.hpp"
+#include <algorithm>
 #include <iomanip>
 #include <iostream>
+#include <set>
 #include <sstream>
 
 namespace peripheral {
@@ -184,8 +186,16 @@ void DiskRecorder::on_frame(std::string_view camera_id, const VideoFrame& frame)
     track.has_seen_frame = true;
     track.is_connected = true;
 
-    // Check disk quota
-    if (current_rec_.bytes + sizeof(VideoFrameHeader) + frame.pixels().size() > config_.disk_quota_bytes) {
+    size_t frame_bytes = sizeof(VideoFrameHeader) + frame.pixels().size();
+
+    // Check emergency disk quota (95% / 1.9 GB) against total disk used across record/
+    uint64_t current_disk_used = total_disk_used_bytes_locked();
+    if (current_disk_used + frame_bytes >= config_.emergency_quota_bytes) {
+        reclaim_disk_space_locked();
+        current_disk_used = total_disk_used_bytes_locked();
+    }
+
+    if (current_disk_used + frame_bytes >= config_.emergency_quota_bytes) {
         GapRecord gap;
         gap.camera_id = cam_str;
         gap.boot_id = frame.header.boot_id;
@@ -208,7 +218,6 @@ void DiskRecorder::on_frame(std::string_view camera_id, const VideoFrame& frame)
         chunk_file_.write(reinterpret_cast<const char*>(pixels.data()), pixels.size());
     }
 
-    size_t frame_bytes = sizeof(VideoFrameHeader) + pixels.size();
     chunk_bytes_written_ += frame_bytes;
     current_rec_.bytes += frame_bytes;
     current_rec_.frames++;
@@ -274,43 +283,125 @@ std::string DiskRecorder::determine_upload_status(const std::filesystem::path& r
     if (!std::filesystem::exists(rec_dir, ec)) return "pending";
 
     bool has_manifest_uploaded = std::filesystem::exists(rec_dir / "manifest.json.uploaded", ec);
-    size_t parts_total = 0;
-    size_t parts_uploaded = 0;
+    std::set<std::string> parts_seen;
+    std::set<std::string> parts_uploaded;
 
     for (const auto& entry : std::filesystem::directory_iterator(rec_dir, ec)) {
-        if (!entry.is_regular_file()) continue;
+        if (!entry.is_regular_file(ec)) continue;
         auto name = entry.path().filename().string();
         if (name.starts_with("part-") && name.ends_with(".bin")) {
-            parts_total++;
+            parts_seen.insert(name);
             std::filesystem::path marker = entry.path();
             marker += ".uploaded";
             if (std::filesystem::exists(marker, ec)) {
-                parts_uploaded++;
+                parts_uploaded.insert(name);
             }
+        } else if (name.starts_with("part-") && name.ends_with(".bin.uploaded")) {
+            std::string base = name.substr(0, name.size() - 9);
+            parts_seen.insert(base);
+            parts_uploaded.insert(base);
         }
     }
 
-    if (has_manifest_uploaded && parts_total > 0 && parts_uploaded == parts_total) {
+    if (has_manifest_uploaded && !parts_seen.empty() && parts_uploaded.size() == parts_seen.size()) {
         return "uploaded";
     }
-    if (parts_uploaded > 0 || has_manifest_uploaded) {
+    if (!parts_uploaded.empty() || has_manifest_uploaded) {
         return "partial";
     }
     return "pending";
 }
 
 uint64_t DiskRecorder::total_disk_used_bytes() const {
+    std::scoped_lock lock(mutex_);
+    return total_disk_used_bytes_locked();
+}
+
+uint64_t DiskRecorder::total_disk_used_bytes_locked() const {
     uint64_t total = 0;
+    std::error_code ec;
     try {
-        if (std::filesystem::exists(config_.root_dir)) {
-            for (const auto& entry : std::filesystem::recursive_directory_iterator(config_.root_dir)) {
-                if (entry.is_regular_file()) {
-                    total += entry.file_size();
+        if (std::filesystem::exists(config_.root_dir, ec)) {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(config_.root_dir, ec)) {
+                if (entry.is_regular_file(ec)) {
+                    total += entry.file_size(ec);
                 }
             }
         }
     } catch (...) {}
     return total;
+}
+
+uint64_t DiskRecorder::reclaim_disk_space() {
+    std::scoped_lock lock(mutex_);
+    return reclaim_disk_space_locked();
+}
+
+uint64_t DiskRecorder::reclaim_disk_space_locked() {
+    uint64_t current_used = total_disk_used_bytes_locked();
+    if (current_used < config_.reclamation_threshold_bytes) {
+        return 0;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::exists(config_.root_dir, ec)) {
+        return 0;
+    }
+
+    // 1. Collect all recording session directories
+    std::vector<std::filesystem::path> rec_dirs;
+    for (const auto& entry : std::filesystem::directory_iterator(config_.root_dir, ec)) {
+        if (entry.is_directory(ec)) {
+            rec_dirs.push_back(entry.path());
+        }
+    }
+
+    // 2. Sort chronologically so oldest sessions are pruned first
+    std::sort(rec_dirs.begin(), rec_dirs.end());
+
+    uint64_t bytes_reclaimed = 0;
+
+    for (const auto& rdir : rec_dirs) {
+        bool is_active_dir = (is_recording_ && rdir == current_rec_dir_);
+
+        for (const auto& f_entry : std::filesystem::directory_iterator(rdir, ec)) {
+            if (!f_entry.is_regular_file(ec)) continue;
+            auto fname = f_entry.path().filename().string();
+
+            if (fname.starts_with("part-") && fname.ends_with(".bin")) {
+                // Never delete the chunk actively being written to
+                if (is_active_dir && fname == current_chunk_filename_) {
+                    continue;
+                }
+
+                // Check for confirmed .uploaded receipt marker
+                std::filesystem::path marker = f_entry.path();
+                marker += ".uploaded";
+
+                if (std::filesystem::exists(marker, ec)) {
+                    uint64_t fsz = f_entry.file_size(ec);
+                    if (!ec && std::filesystem::remove(f_entry.path(), ec)) {
+                        bytes_reclaimed += fsz;
+                        current_used = (current_used >= fsz) ? (current_used - fsz) : 0;
+                        if (current_used < config_.reclamation_threshold_bytes) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (current_used < config_.reclamation_threshold_bytes) {
+            break;
+        }
+    }
+
+    total_bytes_reclaimed_ += bytes_reclaimed;
+    if (bytes_reclaimed > 0) {
+        std::cout << "[DiskRecorder] Reclaimed " << bytes_reclaimed << " bytes from uploaded chunks. "
+                  << "Total disk used now: " << current_used << " bytes.\n";
+    }
+    return bytes_reclaimed;
 }
 
 double DiskRecorder::write_bytes_per_second() const {
@@ -321,6 +412,10 @@ double DiskRecorder::write_bytes_per_second() const {
 
 void DiskRecorder::open_next_chunk_locked() {
     close_current_chunk_locked();
+
+    // Trigger automatic disk reclamation on chunk rotation
+    reclaim_disk_space_locked();
+
     current_part_seq_++;
 
     std::ostringstream oss;
