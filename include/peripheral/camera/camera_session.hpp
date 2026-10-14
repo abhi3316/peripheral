@@ -1,6 +1,8 @@
 #pragma once
 
 #include "peripheral/camera/camera_endpoint.hpp"
+#include "peripheral/camera/pose_interpolator.hpp"
+#include "peripheral/camera/time_sync.hpp"
 #include "peripheral/memory/frame_pool.hpp"
 #include "peripheral/protocol/control_framer.hpp"
 #include "peripheral/protocol/protocol.hpp"
@@ -11,12 +13,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace peripheral {
 
@@ -91,6 +95,11 @@ public:
     [[nodiscard]] bool is_control_connected() const noexcept;
     [[nodiscard]] bool is_running() const noexcept;
 
+    // Clock & Pose Queries
+    [[nodiscard]] const TimeSyncFilter& time_filter() const noexcept { return time_filter_; }
+    [[nodiscard]] const PoseInterpolator& pose_interpolator() const noexcept { return pose_interpolator_; }
+    [[nodiscard]] bool is_time_synchronized() const noexcept { return time_filter_.is_synchronized(); }
+
     // Framer statistics
     [[nodiscard]] uint64_t valid_frames() const noexcept;
     [[nodiscard]] uint64_t corrupt_frames() const noexcept;
@@ -98,17 +107,30 @@ public:
     [[nodiscard]] uint64_t garbage_bytes_discarded() const noexcept;
 
 private:
+    void time_sync_loop();
+
     CameraEndpoint endpoint_;
     CameraSessionConfig config_;
     FramePoolPartition* pool_partition_{nullptr};
 
-    mutable std::mutex session_mutex_;
+    mutable std::recursive_mutex session_mutex_;
 
     std::unique_ptr<StreamCapture> video_stream_;
     std::unique_ptr<StreamCapture> control_stream_;
 
     VideoFramer video_framer_;
     ControlFramer control_framer_;
+
+    TimeSyncFilter time_filter_;
+    PoseInterpolator pose_interpolator_;
+    uint32_t exposure_us_{10000};
+    uint16_t boot_id_{0};
+
+    // 4 Hz periodic TIME_REQ synchronization worker thread
+    std::thread time_sync_thread_;
+    std::atomic<bool> time_sync_running_{false};
+    std::condition_variable time_sync_cv_;
+    std::mutex time_sync_cv_mutex_;
 
     FrameHandler frame_handler_;
     PoseHandler pose_handler_;

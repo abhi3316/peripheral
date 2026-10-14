@@ -38,6 +38,7 @@ add_library(peripheral_socket
     src/protocol/control_framer.cc
     src/camera/camera_session.cc
     src/web/web_server.cc
+    src/storage/disk_recorder.cc
 )
 
 target_include_directories(peripheral_socket PUBLIC
@@ -125,8 +126,29 @@ target_link_libraries(test_frame_pool PRIVATE
 
 add_test(NAME FramePoolTest COMMAND test_frame_pool)
 
+add_executable(test_time_sync
+    tests/test_time_sync.cc
+)
+
+target_link_libraries(test_time_sync PRIVATE
+    peripheral_socket
+)
+
+add_test(NAME TimeSyncTest COMMAND test_time_sync)
+
+add_executable(test_disk_recorder
+    tests/test_disk_recorder.cc
+)
+
+target_link_libraries(test_disk_recorder PRIVATE
+    peripheral_socket
+)
+
+add_test(NAME DiskRecorderTest COMMAND test_disk_recorder)
+
 # Python Functional Test with Virtual Camera Simulator
 find_package(Python3 COMPONENTS Interpreter)
 if (Python3_Interpreter_FOUND)
     add_test(NAME FunctionalCameraTest COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_functional_camera.py)
 endif()
+

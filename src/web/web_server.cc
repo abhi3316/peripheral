@@ -57,7 +57,7 @@ inline uint64_t now_monotonic_us() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
 }
 
-inline std::string current_wall_time_iso() {
+[[maybe_unused]] inline std::string current_wall_time_iso() {
     auto now = std::chrono::system_clock::now();
     auto in_time_t = std::chrono::system_clock::to_time_t(now);
     char buf[64];
@@ -235,6 +235,9 @@ inline std::string get_embedded_viewer_html() {
       <tr><th>Pan Angle</th><td id="valPan">0.0°</td></tr>
       <tr><th>Tilt Angle</th><td id="valTilt">0.0°</td></tr>
       <tr><th>Motion State</th><td id="valMotion">idle</td></tr>
+      <tr><th>Clock Sync</th><td id="valClockSync">Not Synced</td></tr>
+      <tr><th>Clock Offset</th><td id="valClockOffset">0 µs</td></tr>
+      <tr><th>Network RTT</th><td id="valClockRtt">0 µs</td></tr>
       <tr><th>Truth Error</th><td id="valError">N/A</td></tr>
     </table>
     <h2>Ingress Statistics</h2>
@@ -264,11 +267,14 @@ inline std::string get_embedded_viewer_html() {
         <button class="jog-down" onmousedown="jog(0, -20)" onmouseup="jog(0,0)" title="Tilt Down">▼</button>
       </div>
       <div style="display:flex; flex-direction:column; gap:8px;">
-        <button onclick="sendCmd('home')">Home Camera</button>
+        <div style="display:flex; gap:6px;">
+          <button onclick="sendCmd('play')" style="background:var(--accent); color:white; border:none; padding:6px 12px; border-radius:4px; font-weight:600; cursor:pointer;" title="Resume continuous playback of motion.csv">▶ Play Motion</button>
+          <button onclick="sendCmd('home')" style="cursor:pointer;">Home Camera</button>
+        </div>
         <div style="display:flex; gap:6px; align-items:center;">
           <input id="gotoPan" type="number" placeholder="Pan °" style="width:70px; padding:6px; background:var(--bg-main); border:1px solid var(--border); color:#fff; border-radius:4px;">
           <input id="gotoTilt" type="number" placeholder="Tilt °" style="width:70px; padding:6px; background:var(--bg-main); border:1px solid var(--border); color:#fff; border-radius:4px;">
-          <button onclick="sendGoto()">Go To</button>
+          <button onclick="sendGoto()" style="cursor:pointer;">Go To</button>
         </div>
       </div>
     </div>
@@ -351,6 +357,12 @@ async function fetchState() {
         document.getElementById('valTilt').innerText = cam.pose.tiltDeg.toFixed(1) + '°';
       }
       document.getElementById('valMotion').innerText = cam.motion;
+      if (cam.clock) {
+        document.getElementById('valClockSync').innerText = cam.clock.synchronized ? 'SYNCHRONIZED' : 'Acquiring...';
+        document.getElementById('valClockSync').style.color = cam.clock.synchronized ? 'var(--green)' : 'var(--text-secondary)';
+        document.getElementById('valClockOffset').innerText = (cam.clock.offsetUs > 0 ? "+" : "") + cam.clock.offsetUs + " µs";
+        document.getElementById('valClockRtt').innerText = cam.clock.rttUs + " µs";
+      }
       document.getElementById('statValid').innerText = cam.counters.framesReceived;
       document.getElementById('statCorrupt').innerText = cam.counters.framesDamaged;
       document.getElementById('statDropped').innerText = cam.counters.framesMissing;
@@ -510,8 +522,7 @@ void WebServer::on_frame_received(std::string_view camera_name, const VideoFrame
     prev.exposure_start_us = frame.header.exposure_start;
     prev.exposure_end_us = frame.header.exposure_start + 10000;
     prev.truth_stamp = frame.truth_stamp;
-    prev.received_at_mono_us = now_monotonic_us();
-    prev.recorded = is_recording_;
+    prev.recorded = recorder_ ? recorder_->is_recording() : false;
 
     // If pose was estimated
     if (frame.pose_valid) {
@@ -529,9 +540,8 @@ void WebServer::on_frame_received(std::string_view camera_name, const VideoFrame
     // Downsample full image to 320x200
     prev.downsampled_pixels = downsample_320x200(frame.pixels(), frame.header.width, frame.header.height, 320, 200);
 
-    if (is_recording_) {
-        recorded_frames_++;
-        recorded_bytes_ += sizeof(VideoFrameHeader) + frame.payload_size();
+    if (recorder_) {
+        recorder_->on_frame(camera_name, frame);
     }
 }
 
@@ -654,6 +664,20 @@ void WebServer::handle_client(int client_fd) {
                 sess->send_home();
             } else if (req.find("\"stop\"") != std::string::npos) {
                 sess->send_stop();
+            } else if (req.find("\"play\"") != std::string::npos) {
+                uint16_t admin_port = (target_cam == "cam1") ? 7010 : 7000;
+                int sock = ::socket(AF_INET, SOCK_STREAM, 0);
+                if (sock >= 0) {
+                    struct sockaddr_in sin{};
+                    sin.sin_family = AF_INET;
+                    sin.sin_port = htons(admin_port);
+                    ::inet_pton(AF_INET, "127.0.0.1", &sin.sin_addr);
+                    if (::connect(sock, reinterpret_cast<struct sockaddr*>(&sin), sizeof(sin)) == 0) {
+                        std::string post_req = "POST /admin/play HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+                        ::send(sock, post_req.data(), post_req.size(), 0);
+                    }
+                    ::close(sock);
+                }
             } else if (req.find("\"goto\"") != std::string::npos) {
                 float p = 0.0f, t = 0.0f;
                 auto pp = req.find("\"panDeg\":");
@@ -704,14 +728,13 @@ void WebServer::handle_client(int client_fd) {
     }
 
     if (path == "/api/recording/start" && method == "POST") {
-        std::scoped_lock lock(mutex_);
-        is_recording_ = true;
-        active_recording_id_ = "rec-" + std::to_string(now_monotonic_us() / 1000);
-        recording_started_mono_us_ = now_monotonic_us();
-        recording_started_wall_ = current_wall_time_iso();
-        recorded_frames_ = 0;
-        recorded_bytes_ = 0;
-        std::string body = "{\"ok\":true,\"recordingId\":\"" + active_recording_id_ + "\"}";
+        std::string rec_id = "rec-001";
+        if (recorder_) {
+            recorder_->start_recording();
+            auto act = recorder_->active_recording();
+            if (act) rec_id = act->recording_id;
+        }
+        std::string body = "{\"ok\":true,\"recordingId\":\"" + rec_id + "\"}";
         std::ostringstream oss;
         oss << "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: "
             << body.size() << "\r\n\r\n" << body;
@@ -722,8 +745,9 @@ void WebServer::handle_client(int client_fd) {
     }
 
     if (path == "/api/recording/stop" && method == "POST") {
-        std::scoped_lock lock(mutex_);
-        is_recording_ = false;
+        if (recorder_) {
+            recorder_->stop_recording();
+        }
         std::string body = "{\"ok\":true}";
         std::string resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 11\r\n\r\n" + body;
         ::send(client_fd, resp.data(), resp.size(), 0);
@@ -732,9 +756,12 @@ void WebServer::handle_client(int client_fd) {
     }
 
     if (path == "/api/recordings") {
-        std::string body = "[]";
-        std::string resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 2\r\n\r\n[]";
-        ::send(client_fd, resp.data(), resp.size(), 0);
+        std::string body = recorder_ ? recorder_->list_recordings_json() : "[]";
+        std::ostringstream oss;
+        oss << "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: "
+            << body.size() << "\r\n\r\n" << body;
+        std::string s = oss.str();
+        ::send(client_fd, s.data(), s.size(), 0);
         ::close(client_fd);
         return;
     }
@@ -795,6 +822,9 @@ std::string WebServer::generate_state_json() {
         uint64_t corrupt_cnt{0};
         uint64_t dropped_cnt{0};
         uint64_t garbage_cnt{0};
+        int64_t clock_offset_us{0};
+        uint64_t clock_rtt_us{0};
+        bool clock_synchronized{false};
     };
 
     std::vector<std::pair<std::string, CameraSession*>> sess_copies;
@@ -815,6 +845,9 @@ std::string WebServer::generate_state_json() {
             info.corrupt_cnt = sess->corrupt_frames();
             info.dropped_cnt = sess->dropped_frames();
             info.garbage_cnt = sess->garbage_bytes_discarded();
+            info.clock_offset_us = sess->time_filter().current_offset_us();
+            info.clock_rtt_us = sess->time_filter().last_rtt_us();
+            info.clock_synchronized = sess->time_filter().is_synchronized();
         }
         cam_info[name] = info;
     }
@@ -864,7 +897,11 @@ std::string WebServer::generate_state_json() {
             << "      \"target\": null,\n"
             << "      \"limits\": {\"panMinDeg\": -170, \"panMaxDeg\": 170, \"tiltMinDeg\": -30, \"tiltMaxDeg\": 90, \"panMaxDegPerS\": 100, \"tiltMaxDegPerS\": 50},\n"
             << "      \"stream\": {\"width\": 1000, \"height\": 625, \"fps\": 25},\n"
-            << "      \"clock\": {\"offsetUs\": 0, \"driftPpm\": 0.0, \"uncertaintyUs\": 50},\n"
+            << "      \"clock\": {\"offsetUs\": " << info.clock_offset_us
+            << ", \"driftPpm\": 0.0"
+            << ", \"rttUs\": " << info.clock_rtt_us
+            << ", \"synchronized\": " << (info.clock_synchronized ? "true" : "false")
+            << ", \"uncertaintyUs\": " << (info.clock_rtt_us / 2) << "},\n"
             << "      \"counters\": {\n"
             << "        \"framesReceived\": " << info.valid_cnt << ",\n"
             << "        \"framesDamaged\": " << info.corrupt_cnt << ",\n"
@@ -876,12 +913,16 @@ std::string WebServer::generate_state_json() {
             << "    }";
     }
 
+    uint64_t disk_quota = recorder_ ? recorder_->disk_quota_bytes() : 2000000000ULL;
+    uint64_t disk_used = recorder_ ? recorder_->total_disk_used_bytes() : 0;
+    double disk_write_rate = recorder_ ? recorder_->write_bytes_per_second() : 0.0;
+
     oss << "\n  ],\n"
         << "  \"pipeline\": {\n"
         << "    \"ingestBytesPerS\": 31250000,\n"
         << "    \"ingestFramesPerS\": 50,\n"
         << "    \"buffer\": {\"capacityBytes\": 40000000, \"usedBytes\": 1250000, \"highWaterBytes\": 2500000},\n"
-        << "    \"disk\": {\"quotaBytes\": 2000000000, \"usedBytes\": " << recorded_bytes_ << ", \"writeBytesPerS\": " << (is_recording_ ? 31250000 : 0) << "},\n"
+        << "    \"disk\": {\"quotaBytes\": " << disk_quota << ", \"usedBytes\": " << disk_used << ", \"writeBytesPerS\": " << static_cast<uint64_t>(disk_write_rate) << "},\n"
         << "    \"memoryBytes\": 45000000\n"
         << "  },\n"
         << "  \"upload\": {\n"
@@ -892,19 +933,31 @@ std::string WebServer::generate_state_json() {
         << "    \"oldestPendingUs\": null\n"
         << "  },\n";
 
-    if (is_recording_) {
-        oss << "  \"recording\": {\n"
-            << "    \"recordingId\": \"" << active_recording_id_ << "\",\n"
-            << "    \"state\": \"recording\",\n"
-            << "    \"startedAtUs\": " << recording_started_mono_us_ << ",\n"
-            << "    \"startedAtWall\": \"" << recording_started_wall_ << "\",\n"
-            << "    \"stoppedAtUs\": null,\n"
-            << "    \"frames\": " << recorded_frames_ << ",\n"
-            << "    \"bytes\": " << recorded_bytes_ << ",\n"
-            << "    \"gaps\": [],\n"
-            << "    \"complete\": false,\n"
-            << "    \"upload\": \"pending\"\n"
-            << "  },\n";
+    if (recorder_ && recorder_->is_recording()) {
+        auto active = recorder_->active_recording();
+        if (active) {
+            oss << "  \"recording\": {\n"
+                << "    \"recordingId\": \"" << active->recording_id << "\",\n"
+                << "    \"state\": \"recording\",\n"
+                << "    \"startedAtUs\": " << active->started_at_us << ",\n"
+                << "    \"startedAtWall\": \"" << active->started_at_wall << "\",\n"
+                << "    \"stoppedAtUs\": null,\n"
+                << "    \"frames\": " << active->frames << ",\n"
+                << "    \"bytes\": " << active->bytes << ",\n"
+                << "    \"complete\": false,\n"
+                << "    \"upload\": \"pending\",\n"
+                << "    \"gaps\": [";
+            for (size_t gi = 0; gi < active->gaps.size(); ++gi) {
+                if (gi > 0) oss << ",";
+                const auto& g = active->gaps[gi];
+                oss << "{\"cameraId\":\"" << g.camera_id << "\",\"bootId\":" << g.boot_id
+                    << ",\"fromSeq\":" << g.from_seq << ",\"toSeq\":" << g.to_seq
+                    << ",\"reason\":\"" << g.reason << "\"}";
+            }
+            oss << "]\n  },\n";
+        } else {
+            oss << "  \"recording\": null,\n";
+        }
     } else {
         oss << "  \"recording\": null,\n";
     }

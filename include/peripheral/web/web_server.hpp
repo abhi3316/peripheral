@@ -3,6 +3,7 @@
 #include "peripheral/camera/camera_session.hpp"
 #include "peripheral/protocol/protocol.hpp"
 #include "peripheral/protocol/video_frame.hpp"
+#include "peripheral/storage/disk_recorder.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -57,6 +58,9 @@ public:
     WebServer& operator=(const WebServer&) = delete;
 
     void register_session(CameraSession* session);
+    void set_recorder(DiskRecorder* recorder) noexcept {
+        recorder_ = recorder;
+    }
 
     bool start();
     void stop();
@@ -83,13 +87,8 @@ private:
     std::map<std::string, CachedPreview> latest_previews_;
     std::map<std::string, PosePayload> latest_poses_;
 
-    // Recording management
-    bool is_recording_{false};
-    std::string active_recording_id_;
-    uint64_t recording_started_mono_us_{0};
-    std::string recording_started_wall_;
-    uint64_t recorded_frames_{0};
-    uint64_t recorded_bytes_{0};
+    // Storage & Recording management
+    DiskRecorder* recorder_{nullptr};
 };
 
 } // namespace peripheral

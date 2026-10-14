@@ -30,7 +30,12 @@
 
 // 4. Camera Coordination Subsystem
 #include "peripheral/camera/camera_endpoint.hpp"
+#include "peripheral/camera/time_sync.hpp"
+#include "peripheral/camera/pose_interpolator.hpp"
 #include "peripheral/camera/camera_session.hpp"
 
 // 5. Web & Serving Subsystem
 #include "peripheral/web/web_server.hpp"
+
+// 6. Storage & Edge Recording Subsystem
+#include "peripheral/storage/disk_recorder.hpp"

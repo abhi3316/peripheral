@@ -8,16 +8,40 @@ CameraSession::CameraSession(CameraEndpoint endpoint, CameraSessionConfig config
       pool_partition_(pool_partition),
       video_framer_(2 * 1024 * 1024, pool_partition_) {
     // Wire up framer internal callbacks
-    video_framer_.set_frame_callback([this](const VideoFrame& frame) {
+    video_framer_.set_frame_callback([this](const VideoFrame& raw_frame) {
+        VideoFrame frame = raw_frame;
+        // Mid-exposure time calculation in camera clock µs
+        uint32_t t_mid_cam = frame.header.exposure_start + (exposure_us_ / 2);
+
+        // 1. Pose Interpolation at mid-exposure
+        auto interp = pose_interpolator_.interpolate(t_mid_cam);
+        if (interp.valid) {
+            frame.estimated_pan_deg = interp.pan_deg;
+            frame.estimated_tilt_deg = interp.tilt_deg;
+            frame.pose_valid = true;
+        }
+
+        // 2. Exact Server Monotonic Time translation
+        if (time_filter_.is_synchronized()) {
+            frame.rx_monotonic_us = time_filter_.camera_to_server_us(t_mid_cam);
+        }
+
         if (frame_handler_) {
             frame_handler_(frame);
         }
     });
 
     control_framer_.set_pose_callback([this](const PosePayload& pose) {
+        pose_interpolator_.push_pose(pose);
         if (pose_handler_) {
             pose_handler_(pose);
         }
+    });
+
+    control_framer_.set_time_resp_callback([this](const TimeRespPayload& resp) {
+        auto now = std::chrono::steady_clock::now().time_since_epoch();
+        uint64_t t4 = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
+        time_filter_.on_time_resp(resp.echo, resp.t2, resp.t3, t4, boot_id_);
     });
 
     control_framer_.set_status_callback([this](const StatusPayload& status) {
@@ -27,6 +51,9 @@ CameraSession::CameraSession(CameraEndpoint endpoint, CameraSessionConfig config
     });
 
     control_framer_.set_hello_callback([this](const HelloPayload& hello) {
+        exposure_us_ = (hello.exposure_us > 0) ? hello.exposure_us : 10000;
+        boot_id_ = hello.boot_id;
+        time_filter_.on_boot_change(hello.boot_id);
         if (hello_handler_) {
             hello_handler_(hello);
         }
@@ -49,9 +76,11 @@ bool CameraSession::start() {
         return true;
     }
 
-    // Reset framers for a fresh session
+    // Reset framers and filters for a fresh session
     video_framer_.reset();
     control_framer_.reset();
+    pose_interpolator_.reset();
+    time_filter_.reset();
 
     // Configure direct zero-copy ingress into preallocated slot
     config_.video_config.writable_span_provider = [this](size_t min_bytes) {
@@ -108,26 +137,85 @@ bool CameraSession::start() {
         }
     );
 
+    // 3. Spawn 4 Hz periodic TIME_REQ synchronization worker thread
+    time_sync_running_ = true;
+    time_sync_thread_ = std::thread(&CameraSession::time_sync_loop, this);
+
     return true;
 }
 
 void CameraSession::stop() {
     std::unique_ptr<StreamCapture> vid;
     std::unique_ptr<StreamCapture> ctrl;
+    std::thread sync_th;
     {
         std::scoped_lock lock(session_mutex_);
         if (!running_.exchange(false)) {
             return;
         }
+        time_sync_running_ = false;
+        time_sync_cv_.notify_all();
+        sync_th = std::move(time_sync_thread_);
         vid = std::move(video_stream_);
         ctrl = std::move(control_stream_);
     }
 
+    if (sync_th.joinable()) {
+        sync_th.join();
+    }
     if (vid) {
         vid->stop();
     }
     if (ctrl) {
         ctrl->stop();
+    }
+}
+
+/**
+ * =========================================================================================
+ * ARCHITECTURAL NOTE ON PRODUCTION DESIGN & PTP (IEEE 1588) ALTERNATIVE:
+ *
+ * In an ideal production environment where cameras and host network interfaces (NICs)
+ * support hardware PTP (IEEE 1588 / 802.1AS), clock synchronization is performed directly
+ * at the Ethernet MAC/PHY layer using hardware timestamping and standard system daemons 
+ * (e.g. linuxptp / ptp4l / phc2sys).
+ *
+ * Under that architecture:
+ *  1. The camera's hardware clock and the host's system clock are continuously disciplined
+ *     to sub-microsecond alignment.
+ *  2. Camera timestamps on video frames and telemetry directly correlate to system
+ *     CLOCK_REALTIME / CLOCK_MONOTONIC.
+ *  3. This entire software synchronization loop (4 Hz TIME_REQ polling, offset tracking,
+ *     and software filtering) would NOT be present—the server would simply read the
+ *     camera timestamp directly as a valid system time.
+ *
+ * However, because:
+ *  - The target deployment is constrained to 1 CPU core, 250 MB RAM, and userland permissions.
+ *  - The camera communicates via a standard application-layer TCP socket without hardware PTP.
+ *  - The camera's 32-bit clock counter drifts by up to ±100 ppm, resets on reboot, and
+ *    rolls over to 0 every 71.58 minutes.
+ *
+ * We implement this userland software TimeSyncFilter. It applies PTP's 4-timestamp formula
+ * (t1, t2, t3, t4) over TCP to compute round-trip delay, reject network jitter, handle
+ * 32-bit counter unwrapping, and maintain a smooth clock offset with zero runtime heap allocations.
+ * =========================================================================================
+ */
+void CameraSession::time_sync_loop() {
+    while (time_sync_running_) {
+        {
+            std::unique_lock<std::mutex> lock(time_sync_cv_mutex_);
+            time_sync_cv_.wait_for(lock, std::chrono::milliseconds(250), [this] {
+                return !time_sync_running_.load();
+            });
+        }
+        if (!time_sync_running_) {
+            break;
+        }
+
+        // Send TIME_REQ with current CLOCK_MONOTONIC in microseconds as echo
+        auto now = std::chrono::steady_clock::now().time_since_epoch();
+        uint64_t t1 = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
+        send_time_req(t1);
     }
 }
 

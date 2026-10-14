@@ -198,7 +198,7 @@ def test_camera(cam_name: str, ctrl_port: int, vid_port: int, admin_port: int, e
         assert stats["stream"]["height"] == 625
         print(f"[{cam_name}] Admin API /admin/stats verified: cameraId='{stats['cameraId']}', fps={stats['stream']['fps']}, framesSent={stats['framesSent']}")
 
-    truth_req = urllib.request.Request(f"http://127.0.0.1:{admin_port}/admin/truth")
+    truth_req = urllib.request.Request(f"http://127.0.0.1:{admin_port}/admin/truth?fromSeq={max(0, fseq - 5)}")
     with urllib.request.urlopen(truth_req, timeout=3.0) as resp:
         assert resp.status == 200
         truth_body = json.loads(resp.read().decode("utf-8"))

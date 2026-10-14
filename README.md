@@ -142,25 +142,33 @@ peripheral/
 * `include/peripheral/video_framer.hpp` & `src/video_framer.cc`: Robust deframing engine that parses raw frames, validates CRC checksums, extracts truth stamps, classifies fates (`Sent`, `Corrupt`, `Cut`), and automatically recovers from up to 5,000 bytes of garbage.
 * `include/peripheral/control_framer.hpp` & `src/control_framer.cc`: Parses telemetry (`HELLO`, `POSE`, `STATUS`, `TIME_RESP`, `ACK`) and serializes outgoing motion commands (`TIME_REQ`, `CMD`).
 
-### 10. Embedded WebServer & Operator Web Viewer
-* `include/peripheral/web_server.hpp` & `src/web_server.cc`: Embedded lightweight HTTP server on port `8080`.
+### 10. WebServer & Official Operator Viewer (`utils/viewer`)
+* `include/peripheral/web/web_server.hpp` & `src/web/web_server.cc`: Embedded HTTP server on port `8080`.
 * Downsamples incoming 1000×625 (625 KB) raw frames down to 320×200 (~64 KB) in real time (<0.1 ms latency).
-* Serves REST APIs (`/api/state`, `/api/preview`, `/api/command`, `/api/jog`, `/api/recording/start|stop`).
-* Serves a built-in, standalone HTML5/Canvas Operator Web Viewer on `http://localhost:8080/` with live video stream, crosshair, truth-stamp tracking error readout, and pan-tilt motion controls.
+* Serves REST APIs (`/api/state`, `/api/preview`, `/api/command`, `/api/jog`, `/api/recording/start`, `/api/recording/stop`, `/api/recordings`).
+* Directly serves the official React Operator Viewer bundle (`utils/viewer/dist/`) on `http://localhost:8080/`, or interfaces with the Vite dev server on `http://localhost:5173/`.
+
+### 11. Dual-Camera Storage & Recording Subsystem (`record/`)
+* `include/peripheral/storage/disk_recorder.hpp` & `src/storage/disk_recorder.cc`:
+  - Synchronized dual-camera capture writing into `record/rec-<id>/` at the project root.
+  - Deterministic chunking: Splits stream into `part-0001.bin`, `part-0002.bin`, ... (10 MB per chunk).
+  - Exact wire format: Back-to-back 32-byte `VideoFrameHeader` + image payload with truth stamps.
+  - Zero heap allocation churn during streaming.
+  - Gap accounting tracking missing sequences, corruptions, and disconnects.
+  - Auto-generated `manifest.json` describing recording metadata and state.
 
 ---
 
-## Viewing the Live Camera Feed
+## Viewing and Recording with the Official Operator Viewer
 
-### Step 1: Start the Camera Simulator
-Run either the TypeScript simulator from `utils/tools` or the standalone Python simulator:
+### Step 1: Start the Official Camera Simulator
+Run the official simulator from `utils/tools`:
 ```bash
-# Option A: TypeScript simulator from utils
-cd utils/tools && npm install && npm run camera
-
-# Option B: Python simulator
-python3 scripts/virtual_camera.py
+cd utils/tools && npm run camera
 ```
+This spawns:
+- `cam0`: Control `:7001`, Video `:7002`, Admin `http://127.0.0.1:7000/admin/stats`
+- `cam1`: Control `:7011`, Video `:7012`, Admin `http://127.0.0.1:7010/admin/stats`
 
 ### Step 2: Build and Start the Gateway Server
 In another terminal, build and run `peripheral_server`:
@@ -170,15 +178,28 @@ cmake --build build
 ./build/peripheral_server
 ```
 
-### Step 3: Open the Viewer in Your Browser
+### Step 3: Open the Official Viewer
+Run the Vite development server in `utils/viewer`:
+```bash
+cd utils/viewer
+npm run dev
+```
 Open:
 ```
-http://localhost:8080/
+http://localhost:5173/
 ```
-In this interface you can:
-* **View the live video feed**: Real-time 320×200 preview from `cam0` or `cam1` with centered crosshairs.
-* **Inspect tracking error**: The viewer decodes the embedded 12-byte truth stamp and shows the exact tracking error against reported pose.
-* **Control camera motion**: Use the on-screen D-Pad to jog pan and tilt, click **Home**, or send **Go To** target angles.
-* **Switch camera rigs**: Toggle between `cam0` (ports 7001/7002) and `cam1` (ports 7011/7012).
-* **Recordings & Telemetry**: Toggle recordings and monitor packet counters (valid frames, corrupt frames, dropped frames, resync bytes discarded).
+(Or open `http://localhost:8080/` which serves the precompiled production bundle `utils/viewer/dist`).
+
+In the Official Viewer:
+* **Recording Panel**: Click **Start recording** in the left sidebar.
+  - Turns into a red **Stop recording** button.
+  - Live readout of recording ID, elapsed time, frame count, byte count, and gap count.
+  - Live video preview displays the blinking `REC` indicator.
+  - Chunks and manifest are written directly to `record/rec-<id>/`.
+* **Stop Recording**: Click **Stop recording**.
+  - Finalizes `manifest.json` on disk.
+  - Appears immediately in the completed recordings table.
+  - Click on the recording ID to inspect gap details and frame metadata.
+* **Camera Controls**: D-Pad jogging, homing, and go-to target positions.
+* **Pipeline Metrics**: Monitor ingest rate (250 Mb/s), buffer utilization, and disk write throughput.
 

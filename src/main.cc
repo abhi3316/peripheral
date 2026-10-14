@@ -68,11 +68,18 @@ int main(int argc, char* argv[]) {
               << slots_per_cam << " slots/camera (" << mb_per_cam << " MB/camera, ~"
               << sec_per_cam << "s ring buffer)\n\n";
 
-    // 1. Initialize WebServer
+    // 1. Initialize DiskRecorder & WebServer
+    peripheral::DiskRecorderConfig rec_cfg;
+    rec_cfg.root_dir = "record";
+    rec_cfg.chunk_max_bytes = 10 * 1024 * 1024;
+    rec_cfg.disk_quota_bytes = 2000000000ULL;
+    peripheral::DiskRecorder disk_recorder(rec_cfg);
+
     peripheral::WebServerConfig web_cfg;
     web_cfg.port = 8080;
     web_cfg.static_dir = "utils/viewer/dist";
     peripheral::WebServer web_server(web_cfg);
+    web_server.set_recorder(&disk_recorder);
 
     std::vector<std::unique_ptr<peripheral::CameraSession>> sessions;
 
@@ -106,11 +113,12 @@ int main(int argc, char* argv[]) {
             // Ingress 2 Hz status arrives here
         });
 
-        session->set_state_callback([](std::string_view stream_name, peripheral::SocketState state) {
+        session->set_state_callback([&disk_recorder, cam_name](std::string_view stream_name, peripheral::SocketState state) {
             const char* state_str = (state == peripheral::SocketState::Connected) ? "Connected" :
                                     (state == peripheral::SocketState::Connecting) ? "Connecting" :
                                     (state == peripheral::SocketState::Disconnected) ? "Disconnected (Retrying)" : "Error";
             std::cout << "    [" << stream_name << "] State: " << state_str << "\n";
+            disk_recorder.on_connection_state(cam_name, state == peripheral::SocketState::Connected);
         });
 
         web_server.register_session(session.get());
@@ -128,11 +136,31 @@ int main(int argc, char* argv[]) {
     std::cout << "Press Ctrl+C to terminate.\n";
 
     auto start_time = std::chrono::steady_clock::now();
+    auto last_log_time = start_time;
+
     while (g_running) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log_time).count() >= 1000) {
+            last_log_time = now;
+            std::cout << "[Heartbeat] ";
+            for (size_t idx = 0; idx < sessions.size(); ++idx) {
+                const auto& session = sessions[idx];
+                const auto& tf = session->time_filter();
+                if (idx > 0) std::cout << " | ";
+                std::cout << session->name() << ": "
+                          << (tf.is_synchronized() ? "SYNCED" : "ACQ")
+                          << " (Δt=" << (tf.current_offset_us() >= 0 ? "+" : "") << tf.current_offset_us() << "µs"
+                          << ", RTT=" << tf.last_rtt_us() << "µs"
+                          << ", Frames=" << session->valid_frames() << ")";
+            }
+            std::cout << "\n";
+        }
+
         if (timeout_ms > 0) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start_time).count();
+                now - start_time).count();
             if (elapsed >= timeout_ms) {
                 break;
             }
