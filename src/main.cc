@@ -25,6 +25,19 @@ int main(int argc, char* argv[]) {
     size_t pool_slots = 64;
     double pool_mb = -1.0;
     std::string log_level_str = "info";
+    std::string cam_host = "127.0.0.1";
+    std::string storage_host = "127.0.0.1";
+    uint16_t web_port = 8080;
+
+    if (const char* env_cam = std::getenv("PERIPHERAL_CAM_HOST")) {
+        cam_host = env_cam;
+    }
+    if (const char* env_storage = std::getenv("PERIPHERAL_STORAGE_HOST")) {
+        storage_host = env_storage;
+    }
+    if (const char* env_port = std::getenv("PERIPHERAL_PORT")) {
+        web_port = static_cast<uint16_t>(std::stoi(env_port));
+    }
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -36,6 +49,12 @@ int main(int argc, char* argv[]) {
             pool_mb = std::stod(argv[++i]);
         } else if (arg == "--log-level" && i + 1 < argc) {
             log_level_str = argv[++i];
+        } else if (arg == "--cam-host" && i + 1 < argc) {
+            cam_host = argv[++i];
+        } else if (arg == "--storage-host" && i + 1 < argc) {
+            storage_host = argv[++i];
+        } else if (arg == "--port" && i + 1 < argc) {
+            web_port = static_cast<uint16_t>(std::stoi(argv[++i]));
         }
     }
 
@@ -49,7 +68,10 @@ int main(int argc, char* argv[]) {
     std::cout << "[EventLogger] Minimum Log Level: " << peripheral::to_string(log_level)
               << " | Atomic Ring Buffer: " << event_logger.ring_capacity() << " slots\n\n";
 
-    const auto endpoints = peripheral::CameraEndpoint::default_endpoints();
+    auto endpoints = peripheral::CameraEndpoint::default_endpoints();
+    for (auto& ep : endpoints) {
+        ep.host = cam_host;
+    }
 
     // Configure Preallocated Slab Pool
     constexpr size_t SLOT_SIZE = 650 * 1024; // 650 KB per slot
@@ -85,7 +107,7 @@ int main(int argc, char* argv[]) {
     peripheral::DiskRecorder disk_recorder(rec_cfg);
 
     peripheral::CloudUploaderConfig cloud_cfg;
-    cloud_cfg.host = "127.0.0.1";
+    cloud_cfg.host = storage_host;
     cloud_cfg.port = 7100;
     cloud_cfg.server_id = "peripheral-1";
     cloud_cfg.auth_token = "dev-token";
@@ -96,7 +118,7 @@ int main(int argc, char* argv[]) {
     disk_recorder.set_cloud_uploader(&cloud_uploader);
 
     peripheral::WebServerConfig web_cfg;
-    web_cfg.port = 8080;
+    web_cfg.port = web_port;
     web_cfg.static_dir = "utils/viewer/dist";
     peripheral::WebServer web_server(web_cfg);
     web_server.set_recorder(&disk_recorder);

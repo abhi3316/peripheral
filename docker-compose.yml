@@ -1,12 +1,15 @@
 services:
-  gateway:
+  # ----------------------------------------------------------------------------
+  # 1. External World: Camera & Cloud Storage Simulators
+  # Represents physical camera rigs (ports 7001-7012) and remote cloud (port 7100)
+  # ----------------------------------------------------------------------------
+  simulator:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: peripheral-gateway
+    container_name: peripheral-simulator
+    entrypoint: ["sh", "-c", "(cd utils/tools && npm run camera -- --host 0.0.0.0) & (cd utils/tools && npm run storage -- --host 0.0.0.0) & wait"]
     ports:
-      - "8080:8080"   # Gateway REST API & Production Operator Viewer
-      - "5173:5173"   # Operator Viewer (Vite Dev Server)
       - "7001:7001"   # Camera 0 Control
       - "7002:7002"   # Camera 0 Video
       - "7011:7011"   # Camera 1 Control
@@ -15,13 +18,36 @@ services:
       - "7010:7010"   # Camera 1 Admin Stats
       - "7100:7100"   # Cloud Storage API
       - "7101:7101"   # Cloud Storage Admin Stats
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # 2. System Under Test: Peripheral Camera Gateway Server (C++26)
+  # STRICT CONSTRAINTS: 1 CPU core, 250 MB RAM, zero swap headroom
+  # ----------------------------------------------------------------------------
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: peripheral-gateway
+    entrypoint: ["./build/peripheral_server"]
+    command: ["--cam-host", "simulator", "--storage-host", "simulator", "--log-level", "info"]
+    ports:
+      - "8080:8080"   # Gateway REST API, Live Events (/events), & Operator Viewer
     volumes:
-      - ./record:/app/record  # Persist recordings on host machine
+      - ./record:/app/record  # Mount recordings directory
     environment:
       - NODE_ENV=production
+      - PERIPHERAL_CAM_HOST=simulator
+      - PERIPHERAL_STORAGE_HOST=simulator
+    # Enforce strict 1 CPU core & 250 MB RAM limit across both Docker CLI and Swarm
+    cpus: 1.0
+    mem_limit: 250m
+    memswap_limit: 250m
     deploy:
       resources:
         limits:
-          cpus: '1.0'         # Enforce 1 physical CPU core constraint
-          memory: 250M        # Enforce 250 MB RAM constraint
+          cpus: '1.0'
+          memory: 250M
+    depends_on:
+      - simulator
     restart: unless-stopped
