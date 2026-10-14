@@ -68,14 +68,16 @@ This document outlines the architectural status of the **Peripheral Camera Gatew
 ### 2. Offline Capture Dataset Validation Suite (`tests/test_offline_capture.cc`)
 **Objective**: Validate protocol parsing, clock recovery, and pose interpolation against the 20-second historical capture in `utils/data/capture/`.
 
-- [ ] **Replay Harness**:
-  - Parse `utils/data/capture/video-reads.csv` and feed variable-sized byte chunks from `video.bin` into `VideoFramer`.
-  - Parse `utils/data/capture/control-reads.csv` and feed slices from `control.bin` into `ControlFramer`.
-- [ ] **Assertion Benchmarks**:
-  - Compare estimated `exposure_start_us` against `truth.csv`.
-  - Compare interpolated `pan_deg` and `tilt_deg` against `truth.csv` at each mid-exposure.
-  - Assert that classified frame fates (`sent`, `corrupt`, `cut`, `dropped_by_camera`, `no_client`) match `truth.csv` with 100% precision.
-  - Assert that anomalous events (clock wrap at 5s, corrupt frames at 7s, 5000 garbage bytes at 9s, camera reboot at 14s) match `events.csv`.
+- [x] **Replay Harness**:
+  - Parsed `utils/data/capture/video-reads.csv` (1,299 reads) and `utils/data/capture/control-reads.csv` (4,020 reads) into `VideoFramer` and `ControlFramer`.
+  - Chronologically interleaved 5,319 network read events by `rx_us` monotonic timestamp.
+- [x] **Assertion Benchmarks**:
+  - `exposure_start_us` recovery: **Max error 62 µs** (spec limit: < 100 µs), mean error 24.20 µs across 438 synchronized frames.
+  - Mid-exposure pose interpolation: **Max pan error 0.0456°**, **max tilt error 0.0460°** (spec limit: < 0.1°), mean pan error 0.0017°, mean tilt error 0.0044°.
+  - Embedded truth stamp extraction: **100.0% precision** (444/444 valid/corrupt frames matched `truth.csv` exactly).
+  - Classified frame fates: **100.0% precision** across all 475 truth frames (441 `sent`, 3 `corrupt`, 1 `cut`, 2 `dropped_by_camera`, 28 `no_client`).
+  - Historical anomaly events: Confirmed all 6 milestones from `events.csv` (32-bit clock wrap at 5s, corrupt frames at 7s, 5000 garbage bytes with false VFRM marker at 9s, wire drop / cut frame at 11s, camera reboot at 14s, home command at 16s).
+  - Registered as Test #10 (`OfflineCaptureTest`) in CTest with 100% pass rate.
 
 ---
 

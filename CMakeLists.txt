@@ -157,6 +157,16 @@ target_link_libraries(test_cloud_uploader PRIVATE
 
 add_test(NAME CloudUploaderTest COMMAND test_cloud_uploader)
 
+add_executable(test_offline_capture
+    tests/test_offline_capture.cc
+)
+
+target_link_libraries(test_offline_capture PRIVATE
+    peripheral_socket
+)
+
+add_test(NAME OfflineCaptureTest COMMAND test_offline_capture)
+
 # Python Functional Test with Virtual Camera Simulator
 find_package(Python3 COMPONENTS Interpreter)
 if (Python3_Interpreter_FOUND)

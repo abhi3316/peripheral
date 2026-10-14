@@ -85,8 +85,9 @@ The project follows a subsystem/component-based architecture under `include/peri
   - `test_time_sync`: PTP 4-timestamp clock offset/delay, 32-bit roll-over, jitter rejection, and 200 Hz pose interpolator unit tests.
   - `test_disk_recorder`: Unit tests for dual-camera chunking, gap detection, and manifest persistence.
   - `test_cloud_uploader`: Unit tests for streaming SHA-256 calculation, HTTP PUT object upload, and backlog telemetry.
+  - `test_offline_capture`: Offline capture dataset validation suite benchmarking clock recovery (<100 µs), pose interpolation (<0.1°), 100% frame fate precision, and all 6 milestone events against `utils/data/capture/`.
   - `FunctionalCameraTest` (`tests/test_functional_camera.py`): End-to-end Python functional test suite.
-- All tests pass 100% (10/10 tests passing).
+- All tests pass 100% (11/11 tests passing).
 - Verified against `utils/tools` (`npm run camera`): Real-time synchronization active, Δt offset tracking, <300 µs network RTT, 25 fps per-camera frame delivery.
 
 ---

@@ -91,9 +91,9 @@ public:
             min_rtt_us_ += 1; // slow decay to adapt to network baseline shifts
         }
 
-        // Discard samples where RTT is an extreme outlier (spike > 3x min_rtt + 5 ms)
-        uint64_t max_acceptable_rtt = min_rtt_us_ * 3 + 5000;
-        if (static_cast<uint64_t>(net_rtt) > max_acceptable_rtt && sample_count_ >= 3) {
+        // Discard samples where RTT is an outlier (spike > 2x min_rtt + 1000 µs)
+        uint64_t max_acceptable_rtt = min_rtt_us_ * 2 + 1000;
+        if (static_cast<uint64_t>(net_rtt) > max_acceptable_rtt && sample_count_ >= 1) {
             return; // reject jitter outlier
         }
 
