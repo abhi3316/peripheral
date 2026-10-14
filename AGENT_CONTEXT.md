@@ -18,23 +18,38 @@ The project follows a subsystem/component-based architecture under `include/peri
 
 ### 1. Transport Subsystem (`include/peripheral/transport/`, `src/transport/`)
 - `socket.hpp` / `socket_types.hpp` / `socket.cc`: Pure non-blocking TCP socket primitives with socket option tuning (`SO_RCVBUF`, `TCP_NODELAY`, `SO_NOSIGPIPE`).
+  - **Thread-Safety Model**: Zero-mutex full-duplex operation (`std::atomic<int> fd_`, `std::atomic<SocketState> state_`) leveraging Linux kernel independent RX/TX queues; single-reader ownership per `StreamCapture` worker thread.
 - `stream_capture.hpp` / `stream_capture.cc`: Background thread TCP stream capture with auto-reconnection and direct zero-copy slot streaming hooks (`writable_span_provider`).
 
 ### 2. Memory Subsystem (`include/peripheral/memory/`, `src/memory/`)
 - `stream_buffer.hpp` / `stream_buffer.cc`: Thread-safe contiguous ring buffer with peek/read support.
-- `frame_pool.hpp` / `frame_pool.cc`: Preallocated circular slab pool (`FrameMemoryPool`, `FramePoolPartition`, `FrameSlot`, intrusive RAII `FrameSlotHandle`) eliminating all runtime heap allocations during ingress ($0\text{ MB/s}$ churn).
+- `frame_pool.hpp` / `frame_pool.cc`: Preallocated circular slab pool (`FrameMemoryPool`, `FramePoolPartition`, `FrameSlot`, intrusive RAII `FrameSlotHandle`) eliminating all runtime heap allocations during ingress ($0\text{ MB/s}$ churn):
+  - **Automatic Per-Camera Dimensioning**: Defaults to 32 slots per camera (`slots_per_endpoint{32}`) and computes `total_slots = endpoint_count * 32` automatically (e.g. 2 cameras -> 64 slots / 40.6 MB, 4 cameras -> 128 slots / 81.25 MB).
+  - **Dynamic System Memory Identification**: Inspects cgroup v2 (`/sys/fs/cgroup/memory.max`), cgroup v1, or POSIX sysconf at startup.
+  - **Kernel Headroom & Fail-Safe Protection**: Enforces a safe ingress ceiling (40% of system memory, capped at 100 MB under the 250 MB ceiling) to reserve 100-150 MB for Linux kernel dirty page cache writeback buffers, socket buffers, and web runtime. Fails fast with `std::invalid_argument` if endpoint memory exceeds the safe ceiling.
 
 ### 3. Protocol & Framing Subsystem (`include/peripheral/protocol/`, `src/protocol/`)
 - `protocol.hpp` / `crc32.hpp`: 32-byte `VFRM`, 16-byte `PTCL`, 12-byte `TruthStamp`, and CRC-32 calculator.
 - `video_frame.hpp`: High-level domain frame backed by `FrameSlotHandle`.
 - `video_framer.hpp` / `video_framer.cc`: 5,000-byte garbage recovery, CRC validation, direct slot ingress, and frame fate classification.
+  - **Thread-Safety Model**: Deliberately unmutexed core to avoid lock contention on 50 fps ingress; thread safety guaranteed via per-camera instance isolation and `CameraSession::session_mutex_` coordination.
 - `control_framer.hpp` / `control_framer.cc`: Telemetry message framing (`HELLO`, `POSE`, `TIME_RESP`, `STATUS`, `ACK`) and command serialization (`TIME_REQ`, `CMD`).
 
 ### 4. Camera Coordination Subsystem (`include/peripheral/camera/`, `src/camera/`)
 - `camera_endpoint.hpp`: Endpoint specifications and ports (`cam0`, `cam1`).
-- `time_sync.hpp`: PTP 4-timestamp software filter (`TimeSyncFilter`) with two's complement 32-bit roll-over unwrapping, jitter outlier rejection, and explicit production PTP hardware alternative architectural note.
-- `pose_interpolator.hpp`: High-frequency 200 Hz camera pose ring buffer and mid-exposure linear interpolator attaching estimated pan/tilt angles with $<0.1^\circ$ precision to `VideoFrame`.
-- `camera_session.hpp` / `camera_session.cc`: Domain coordinator managing dual streams, dedicated endpoint pool partition, 4 Hz periodic `TIME_REQ` sync ticker thread, control commands, and frame enrichment.
+- `time_sync.hpp`: PTP 4-timestamp software filter (`TimeSyncFilter`) with two's complement 32-bit roll-over unwrapping, jitter outlier rejection, and explicit production PTP hardware alternative architectural note:
+  - **Clock Offset Usages**:
+    1. **Frame Monotonic Translation**: `frame.rx_monotonic_us = time_filter.camera_to_server_us(t_mid)` translates 32-bit camera exposure midpoint to 64-bit gateway monotonic clock.
+    2. **Cross-Camera Temporal Correlation**: Synchronizes independent `cam0` and `cam1` physical oscillator timelines for sorted multiplexing in `DiskRecorder`.
+    3. **Clock Drift Alarms**: Raises `clock_sync_lost` normalized alarm if drift exceeds 100 ppm or 5 syncs dropped.
+    4. **Telemetry**: Surfaces real-time delta offset in `GET /api/state` for React viewer status badges.
+- `pose_interpolator.hpp`: High-frequency 200 Hz camera pose ring buffer and mid-exposure linear interpolator attaching estimated pan/tilt angles with $<0.1^\circ$ precision to `VideoFrame` (compensates for 10 ms optical shutter integration, mechanical gimbal rotation up to $50^\circ/\text{s}$, and asynchronous TCP stream serialization latency).
+- `camera_session.hpp` / `camera_session.cc`: Domain coordinator managing dual streams, dedicated endpoint pool partition, 4 Hz periodic `TIME_REQ` sync ticker thread, control commands, and frame enrichment:
+  - **Outbound Camera Control & Command Dispatch Pipeline (Gateway -> Camera)**:
+    - **Channel A (Automated 4 Hz Clock Sync)**: Background `time_sync_thread_` wakes every 250 ms -> captures steady_clock $t_1$ -> acquires `session_mutex_` -> invokes `ControlFramer::serialize_time_req(t1, ++msg_seq_)` (24 bytes: 16B `ControlHeader` with type `0x81` + 8B `TimeReqPayload` + IEEE 802.3 CRC32) -> dispatches over full-duplex control stream (`Port 7001` or `Port 7011`).
+    - **Channel B (Operator Motion Commands)**: REST endpoints `POST /api/command` and `POST /api/jog` routed by `WebServer` -> `CameraSession::send_jog`, `send_home`, `send_goto`, `send_stop` -> acquires `session_mutex_` -> invokes `ControlFramer::serialize_cmd(++cmd_seq_, cmd, a, b, ++msg_seq_)` (28 bytes: 16B `ControlHeader` with type `0x01` + 12B `CmdPayload` + IEEE 802.3 CRC32) -> dispatches over control stream.
+    - **Zero-Mutex Full-Duplex Concurrency**: Kernel-separated send/receive buffers allow outbound `control_stream_->send()` (`TCP_NODELAY = 1`) to execute with zero lock contention against inbound `StreamCapture` threads reading 200 Hz telemetry on the same socket file descriptor.
+    - **Camera Execution & Closed-Loop Telemetry**: Camera executes motion on physical/simulated gimbals, emits `ACK` (type `0x02`), updates motor flags (`moving = 1`, `homed = 1`), and streams updated angles back at 200 Hz via `POSE` packets to close the control loop.
 
 ### 5. Storage Subsystem (`include/peripheral/storage/`, `src/storage/`)
 - `disk_recorder.hpp` / `disk_recorder.cc`: High-throughput dual-camera recording engine:
@@ -53,12 +68,15 @@ The project follows a subsystem/component-based architecture under `include/peri
   - Non-blocking FIFO work queue with condition-variable background processing thread.
   - Zero RAM chunk churn: Streams files from disk in 64 KB buffers with keep-alive socket reuse.
   - Streaming SHA-256 calculator (`crypto/sha256.hpp`) computes FIPS 180-4 hashes for `X-Content-SHA256` headers.
-  - Dynamic status transitions: `201`/`200` marked uploaded, `409` handled, `503` exponential backoff (100 ms to 3 s).
-  - Restart resilience: Scans `record/` on startup and re-queues un-uploaded chunks.
+  - Dual-Trigger Ingestion: Path A (live recording chunk events) + Path B (autonomous disk scanner at boot and idle, draining un-uploaded historical chunks even when recording is STOPPED).
+  - Restart resilience: Scans `record/` on startup and re-queues un-uploaded chunks automatically.
   - Real-time telemetry: Powers `/api/state` upload section (`storage`, `lastContactUs`, `backlogObjects`, `backlogBytes`, `oldestPendingUs`).
 
 ### 6. Web & Operator Serving Subsystem (`include/peripheral/web/`, `src/web/`)
 - `web_server.hpp` / `web_server.cc`: Embedded REST API server on port 8080 and static file server for `utils/viewer/dist`.
+- **Dual-Path Frame Dispatch**: `CameraSession` forwards incoming frames to `WebServer::on_frame_received`:
+  - **Path A (Continuous Live Preview)**: Always active, downsamples full frames to 320x200 in-memory, updating `latest_previews_` for real-time preview streaming (`GET /api/preview?camera=cam0`) with 0 disk writes and 0 cloud traffic.
+  - **Path B (Persistent Disk Recording)**: Conditionally forwards frames to `DiskRecorder::on_frame` only when `recorder_->is_recording()` is true.
 - Exposes recording control endpoints: `POST /api/recording/start`, `POST /api/recording/stop`, `GET /api/recordings`.
 - Exposes live event streaming: `GET /api/events` (with `level`, `since_id`, and `limit` query parameters).
 - Dedicated Live Streaming Dashboard: Serves rich, standalone real-time dashboard at `/events` and `/logs` with level filter pills, active alarm status cards, search filter, auto-scroll, and JSON export.
@@ -180,7 +198,15 @@ If running components individually in separate terminals:
 - **Docker Job**: Builds container image with automated smoke tests, saves it to `peripheral-gateway-docker.tar.gz`, and uploads `peripheral-gateway-docker-image`.
 - Downloadable artifacts are preserved under the Actions run tab for 30 days.
 
-### 8. Docker Strict Resource-Constrained Deployment & Live Verification (`docker-compose.yml`)
+### 8. System Architecture Design Document & Build Procedure (`design-doc.txt` & `DESIGN.md`)
+- Complete engineering documentation covering:
+  - Theoretical & mathematical resource sizing under 250 MB RAM, 1 CPU core, and 2 GB disk.
+  - Subsystem architectural breakdown across all 9 components.
+  - Offline capture dataset validation results (100% precision across 5,319 packets).
+  - Step-by-step native compilation, testing, one-shot runner (`run.sh`), and Docker constrained execution.
+  - Live benchmark metrics table and verification results.
+
+### 9. Docker Strict Resource-Constrained Deployment & Live Verification (`docker-compose.yml`)
 - Multi-container architecture isolating the target system from the test harness:
   - `peripheral-simulator`: Runs the official Node.js camera and cloud storage simulators with `--host 0.0.0.0`.
   - `peripheral-gateway`: Runs the C++26 `peripheral_server` binary with strictly enforced hardware limits:

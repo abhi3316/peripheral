@@ -8,7 +8,7 @@ This document outlines the architectural status of the **Peripheral Camera Gatew
 
 | Subsystem / Feature | Status | Notes |
 |---|---|---|
-| **Non-blocking TCP Socket Transport** | **Complete** | Full-duplex `read_mutex_` / `write_mutex_`, millisecond timeouts, `SO_RCVBUF` 2 MB |
+| **Non-blocking TCP Socket Transport** | **Complete** | Lock-free zero-mutex full-duplex, millisecond timeouts, `SO_RCVBUF` 2 MB |
 | **Stream Capture & Worker Threading** | **Complete** | Background threads, auto-reconnect with exponential backoff on camera restarts |
 | **Preallocated 64-Slot Slab Pool** | **Complete** | Zero-copy slot handles (`FrameSlotHandle`), 0 MB/s heap churn, 40.6 MB footprint |
 | **Protocol Framing & Wire Deframers** | **Complete** | IEEE 802.3 CRC32, 5000-byte garbage recovery, fate classification (`Sent`, `Corrupt`, `Cut`) |

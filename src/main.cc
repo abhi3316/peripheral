@@ -22,7 +22,7 @@ int main(int argc, char* argv[]) {
     std::signal(SIGTERM, handle_signal);
 
     int timeout_ms = -1;
-    size_t pool_slots = 64;
+    size_t pool_slots = 0; // 0 = auto-computed dynamically as endpoints.size() * 32 slots
     double pool_mb = -1.0;
     std::string log_level_str = "info";
     std::string cam_host = "127.0.0.1";
@@ -73,20 +73,31 @@ int main(int argc, char* argv[]) {
         ep.host = cam_host;
     }
 
-    // Configure Preallocated Slab Pool
+    // Configure Preallocated Slab Pool (defaults to 32 slots per camera)
     constexpr size_t SLOT_SIZE = 650 * 1024; // 650 KB per slot
-    if (pool_mb > 0) {
-        pool_slots = static_cast<size_t>((pool_mb * 1024.0 * 1024.0) / SLOT_SIZE);
-    }
-    if (pool_slots < endpoints.size()) {
-        pool_slots = endpoints.size() * 2;
-    }
-
     peripheral::FrameMemoryPool::Config pool_cfg;
-    pool_cfg.total_slots = pool_slots;
     pool_cfg.slot_size = SLOT_SIZE;
     pool_cfg.endpoint_count = endpoints.size();
-    peripheral::FrameMemoryPool frame_pool(pool_cfg);
+    pool_cfg.slots_per_endpoint = 32; // Default 32 slots per camera endpoint
+
+    if (pool_mb > 0) {
+        pool_cfg.total_slots = static_cast<size_t>((pool_mb * 1024.0 * 1024.0) / SLOT_SIZE);
+    } else if (pool_slots > 0) {
+        pool_cfg.total_slots = pool_slots;
+    } else {
+        pool_cfg.total_slots = 0; // Automatically computes endpoints.size() * 32
+    }
+
+    std::unique_ptr<peripheral::FrameMemoryPool> frame_pool_ptr;
+    try {
+        frame_pool_ptr = std::make_unique<peripheral::FrameMemoryPool>(pool_cfg);
+    } catch (const std::exception& e) {
+        std::cerr << "\n[FATAL ERROR] Ingress Memory Pool Sizing Failure:\n"
+                  << "  " << e.what() << "\n\n"
+                  << "Aborting startup to prevent Linux kernel Out-Of-Memory termination.\n";
+        return 1;
+    }
+    auto& frame_pool = *frame_pool_ptr;
 
     double total_mb = frame_pool.total_memory_mb();
     size_t slots_per_cam = frame_pool.slots_per_endpoint();
@@ -95,6 +106,7 @@ int main(int argc, char* argv[]) {
 
     std::cout << "[FramePool] Preallocated Slab Pool Initialized:\n";
     std::cout << "  Total Memory: " << total_mb << " MB (" << frame_pool.total_slots() << " slots @ 650 KB/slot)\n";
+    std::cout << "  Safe Memory Ceiling: " << (frame_pool.max_pool_memory_bytes() / (1024.0 * 1024.0)) << " MB\n";
     std::cout << "  Partitioned across " << endpoints.size() << " endpoints: "
               << slots_per_cam << " slots/camera (" << mb_per_cam << " MB/camera, ~"
               << sec_per_cam << "s ring buffer)\n\n";

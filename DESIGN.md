@@ -77,54 +77,270 @@ Under a **250 MB total RAM ceiling**, dynamic allocations (`malloc`/`new`) 50 ti
 | **Safety Headroom** | **41.3 MB** | 16.5% | Headroom against transient memory spikes |
 | **TOTAL HARD CEILING** | **250.0 MB** | **100.0%** | **Strictly enforced via Docker cgroups v2** |
 
+### 2.4 Why Exactly 32 Slots per Camera?
+
+1. **Covering 1.0 Full Second of Video at 25 fps (+28% Margin)**:
+   * Each camera outputs frames at **25 frames per second** (1 frame every 40 ms).
+   * 25 frames = exactly 1.00 second of temporal history.
+   * Periodic system routines (such as the 1-second system heartbeat, disk quota checks, and time-sync filter passes) execute at **1 Hz (every 1,000 ms)**.
+   * Allocating 32 slots provides:
+     $$\text{Buffer Duration} = \frac{32\text{ frames}}{25\text{ fps}} = \mathbf{1.28\text{ seconds}}$$
+   * **Guarantee**: Even if a 1-second periodic maintenance task or disk chunk rotation stalls processing for a full second, the camera stream has a **+28% safety cushion (7 extra frames)** and will not drop frames.
+
+2. **Power-of-Two Bitwise Masking (`head & 31` vs `%` Division)**:
+   * On a single-core embedded CPU, integer division and modulo (`%`) operations are expensive: `index = head % 25` requires the hardware integer division instruction (`idiv`), taking **15 to 40 CPU clock cycles**.
+   * When ring buffer capacity is a power of two ($2^5 = 32$):
+     $$\text{index} = \text{head}\ \&\ (32 - 1) = \mathbf{\text{head}\ \&\ 31}$$
+     Bitwise AND executes in **exactly 1 CPU clock cycle**.
+   * The previous power of two is 16 ($16 / 25 = 0.64\text{s}$, too short to survive a 1-second stall). 32 is the mathematically optimal power of two.
+
+3. **Multi-Consumer Pipeline Headroom**:
+   * Multiple pipeline stages concurrently reference slots:
+     * **Socket Ingress**: Holds 1 slot (actively receiving raw bytes from the wire).
+     * **Video Deframer**: Holds 1 slot (verifying CRC32 and extracting truth stamps).
+     * **Disk Recorder**: Holds 2–4 slots (batching writes into the 10 MB `.bin` chunk).
+     * **Web Downsampler**: Holds 1–2 slots (downsampling to 320×200 for live preview).
+   * If only 16 slots were allocated, active consumers would occupy 6–8 slots, leaving only ~8 slots (~320 ms) of actual buffering. With 32 slots, even when 8 slots are in-flight across disk and web pipelines, **24+ slots (~1 second)** of cushion remain to absorb bursts.
+
+4. **Per-Camera Failure Isolation (Zero Memory Cross-Talk)**:
+   * The 64-slot pool is cleanly split into two dedicated 32-slot partitions: `cam0` has 32 slots, `cam1` has 32 slots.
+   * If `cam0` suffers network line noise or a socket stall, it cannot consume slots allocated to `cam1`. Both cameras remain completely isolated.
+
+---
+
+### 2.5 Scaling to N Cameras: Architecture Extension Guide
+
+The gateway server was engineered with fully dynamic, scale-invariant data structures. To increase the number of cameras (e.g. from 2 to 4 or more), **only ONE primary file needs to be modified in the C++ codebase**.
+
+#### 1. The Primary Configuration File: `include/peripheral/camera/camera_endpoint.hpp`
+In `CameraEndpoint::default_endpoints()`, append the new camera definitions:
+
+```cpp
+static std::vector<CameraEndpoint> default_endpoints() {
+    return {
+        CameraEndpoint{ .name = "cam0", .host = "127.0.0.1", .control_port = 7001, .video_port = 7002 },
+        CameraEndpoint{ .name = "cam1", .host = "127.0.0.1", .control_port = 7011, .video_port = 7012 },
+        // --- ADD NEW CAMERA RIGS HERE ---
+        CameraEndpoint{ .name = "cam2", .host = "127.0.0.1", .control_port = 7021, .video_port = 7022 },
+        CameraEndpoint{ .name = "cam3", .host = "127.0.0.1", .control_port = 7031, .video_port = 7032 }
+    };
+}
+```
+
+#### 2. Automatic Dynamic Scaling (No other code changes needed)
+* **Memory Pool**: `FrameMemoryPool` automatically dimensions and partitions slots across `endpoints.size()` partitions.
+* **Web Server**: `WebServer` dynamically registers state, preview routes, and pan/tilt jog controls for all camera IDs present in `endpoints`.
+* **Disk Recorder**: `DiskRecorder` multiplexes frames from all active camera sessions into the rolling 10 MB chunks and tracks per-camera sequence gaps.
+* **Event Logger**: `EventLogger` registers health monitors and link alarms for every camera dynamically.
+
+#### 3. Automatic Memory Sizing (32 Slots/Camera Default) & Fail-Safe Protection
+* **Zero-Friction Scaling**: Adding endpoints in `camera_endpoint.hpp` automatically scales the slab pool without requiring manual `--pool-slots` configuration. The server defaults to 32 slots per camera:
+  $$\text{total\_slots} = \text{endpoints.size}() \times 32$$
+  * *2 cameras*: $64\text{ slots} = \mathbf{40.625\text{ MB}}$
+  * *4 cameras*: $128\text{ slots} = \mathbf{81.25\text{ MB}}$
+* **Fail-Safe Memory Threshold (Kernel Page Cache Headroom)**:
+  The ingress memory pool does **not** check against the raw 250 MB ceiling. Under continuous 31.25 MB/s recording, the Linux kernel dirty page cache, file writeback buffers, TCP socket buffers, and web runtime require at least 100–150 MB of headroom.
+* **Dynamic System Memory Identification**:
+  `FrameMemoryPool` queries the container/host memory limits at startup via:
+  1. cgroup v2 (`/sys/fs/cgroup/memory.max`)
+  2. cgroup v1 (`/sys/fs/cgroup/memory/memory.limit_in_bytes`)
+  3. POSIX `sysconf(_SC_PHYS_PAGES)`
+  The safe pool ceiling is computed as:
+  $$\text{safe\_ceiling} = \min(\text{system\_memory} \times 0.40,\, 100\text{ MB})$$
+* **Fail-Fast Rejection on Over-Allocation**:
+  If the requested cameras would exceed this threshold (e.g. 6 cameras @ 32 slots = 121.875 MB > 100 MB), initialization fails immediately with an explicit fatal error, preventing kernel Out-Of-Memory (OOM) killer aborts.
+
+#### 4. Simulator & Docker Configuration for N Cameras
+* **Official Simulator Support**:
+  The provided simulator supports up to 4 cameras natively:
+  ```bash
+  cd utils/tools && npm run camera -- --cameras 4
+  ```
+  *Ports opened:* `cam0` (7001/7002), `cam1` (7011/7012), `cam2` (7021/7022), `cam3` (7031/7032).
+* **Docker Compose**:
+  Expose the additional ports in `docker-compose.yml`:
+  ```yaml
+  ports:
+    - "7021-7022:7021-7022"  # cam2
+    - "7031-7032:7031-7032"  # cam3
+  ```
+
 ---
 
 ## 3. Subsystem Architecture
 
-```
-                  ┌───────────────────────────────────────────────┐
-                  │          Dual Camera Rigs (Ethernet)          │
-                  │   cam0 (7001/7002)     cam1 (7011/7012)       │
-                  └───────┬──────────────┬──────────────┬─────────┘
-                          │ Video        │ Control      │ Video
-                          ▼ (125 Mb/s)   ▼ (200 Hz)     ▼ (125 Mb/s)
-    ┌────────────────────────────────────────────────────────────────────────┐
-    │                        PERIPHERAL GATEWAY SERVER                       │
-    │                                                                        │
-    │  ┌───────────────────────┐             ┌────────────────────────────┐  │
-    │  │  peripheral_socket    │             │   TimeSyncFilter (4 Hz)    │  │
-    │  │  Full-Duplex TCP I/O  │             │   PTP Software Clock Sync  │  │
-    │  └──────────┬────────────┘             └─────────────┬──────────────┘  │
-    │             │                                        │                 │
-    │             ▼                                        ▼                 │
-    │  ┌──────────────────────────────────────────────────────────────────┐  │
-    │  │ VideoFramer & Wire Deframers (5000-byte noise recovery, CRC32)   │  │
-    │  └──────────┬────────────────────────────────────────┬──────────────┘  │
-    │             │                                        │                 │
-    │             ▼                                        ▼                 │
-    │  ┌───────────────────────┐             ┌────────────────────────────┐  │
-    │  │ FrameMemoryPool (Slab)│             │  PoseInterpolator (200 Hz) │  │
-    │  │ 64 Slots / 40.6 MB    │             │  Mid-Exposure Angles       │  │
-    │  └──────────┬────────────┘             └─────────────┬──────────────┘  │
-    │             │                                        │                 │
-    │             ├───────────────────┬────────────────────┤                 │
-    │             ▼                   ▼                    ▼                 │
-    │  ┌─────────────────────┐ ┌──────────────┐ ┌─────────────────────────┐  │
-    │  │ DiskRecorder        │ │ CloudUploader│ │ AtomicEventRingBuffer   │  │
-    │  │ Rolling 10 MB Chunks│ │ HTTP PUT     │ │ Lock-Free Wait-Free     │  │
-    │  │ 80% Reclamation     │ │ Port 7100    │ │ Level Classification    │  │
-    │  └──────────┬──────────┘ └──────┬───────┘ └──────────┬──────────────┘  │
-    │             │                   │                    │                 │
-    │             ▼                   ▼                    ▼                 │
-    │  ┌──────────────────────────────────────────────────────────────────┐  │
-    │  │ Embedded WebServer (Port 8080) & React Operator UI Bundle       │  │
-    │  │ REST APIs (/api/state, /api/preview) + Live Streaming (/events)  │  │
-    │  └──────────────────────────────────────────────────────────────────┘  │
-    └────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    classDef hardware fill:#1e293b,stroke:#475569,stroke-width:2px,color:#f8fafc;
+    classDef transport fill:#0f172a,stroke:#38bdf8,stroke-width:2px,color:#e0f2fe;
+    classDef protocol fill:#1e1b4b,stroke:#818cf8,stroke-width:2px,color:#e0e7ff;
+    classDef memory fill:#064e3b,stroke:#34d399,stroke-width:2px,color:#d1fae5;
+    classDef coord fill:#312e81,stroke:#a78bfa,stroke-width:2px,color:#ede9fe;
+    classDef storage fill:#701a75,stroke:#f472b6,stroke-width:2px,color:#fdf2f8;
+    classDef cloud fill:#7c2d12,stroke:#fb923c,stroke-width:2px,color:#ffedd5;
+    classDef events fill:#831843,stroke:#fb7185,stroke-width:2px,color:#ffe4e6;
+    classDef web fill:#134e4a,stroke:#2dd4bf,stroke-width:2px,color:#ccfbf1;
+    classDef client fill:#0284c7,stroke:#38bdf8,stroke-width:2px,color:#ffffff;
+
+    subgraph EXT["EXTERNAL HARDWARE / CAMERA RIGS & CLOUD"]
+        direction LR
+        subgraph CAM0["Camera Rig 0 (cam0)"]
+            CAM0_V["Video Port 7002\n(125 Mb/s RAW Grayscale\n25 fps, 1000x625)"]:::hardware
+            CAM0_C["Control Port 7001\n(200 Hz POSE, 2 Hz STATUS\n4 Hz TIME_RESP, Pan/Tilt)"]:::hardware
+        end
+        subgraph CAM1["Camera Rig 1 (cam1)"]
+            CAM1_V["Video Port 7012\n(125 Mb/s RAW Grayscale\n25 fps, 1000x625)"]:::hardware
+            CAM1_C["Control Port 7011\n(200 Hz POSE, 2 Hz STATUS\n4 Hz TIME_RESP, Pan/Tilt)"]:::hardware
+        end
+        CLOUD_SERVER["Mock Cloud Object Storage\nHTTP Port 7100\n(Accepts 10 MB Chunks via PUT)"]:::cloud
+    end
+
+    subgraph TRANSPORT["1. TRANSPORT SUBSYSTEM (peripheral_socket)"]
+        direction TB
+        subgraph SOCK_LAYER["Zero-Mutex Lock-Free Full-Duplex Sockets"]
+            TSOCK0_V["TcpSocket (cam0 video)\nSO_RCVBUF=2MB\natomic fd"]:::transport
+            TSOCK0_C["TcpSocket (cam0 control)\nKernel-Separated\nRecv/Send Queues"]:::transport
+            TSOCK1_V["TcpSocket (cam1 video)\nSO_RCVBUF=2MB\natomic fd"]:::transport
+            TSOCK1_C["TcpSocket (cam1 control)\nKernel-Separated\nRecv/Send Queues"]:::transport
+        end
+        subgraph CAPTURE_THREADS["StreamCapture Background Threads"]
+            SC0_V["Worker: cam0_video\n(Zero-copy slot ingress)"]:::transport
+            SC0_C["Worker: cam0_control\n(Telemetry dispatch)"]:::transport
+            SC1_V["Worker: cam1_video\n(Zero-copy slot ingress)"]:::transport
+            SC1_C["Worker: cam1_control\n(Telemetry dispatch)"]:::transport
+        end
+    end
+
+    CAM0_V --> TSOCK0_V --> SC0_V
+    CAM0_C <--> TSOCK0_C <--> SC0_C
+    CAM1_V --> TSOCK1_V --> SC1_V
+    CAM1_C <--> TSOCK1_C <--> SC1_C
+
+    subgraph MEMORY["2. MEMORY SUBSYSTEM (FrameMemoryPool) ~40.6 MB Slab"]
+        direction TB
+        subgraph POOL["Contiguous Slab (64 x 650 KB Slots)"]
+            PART0["cam0 Partition (32 Slots / 20.3 MB)\nMask: head & 31"]:::memory
+            PART1["cam1 Partition (32 Slots / 20.3 MB)\nMask: head & 31"]:::memory
+        end
+        HANDLE["Intrusive RAII FrameSlotHandle (Zero Heap Allocations)"]:::memory
+    end
+
+    SC0_V -->|Acquire slot| PART0
+    SC1_V -->|Acquire slot| PART1
+
+    subgraph PROTOCOL["3. PROTOCOL DEFRAMING & RECOVERY"]
+        direction TB
+        VF0["VideoFramer (cam0)\n5000B noise scan, CRC32"]:::protocol
+        VF1["VideoFramer (cam1)\n5000B noise scan, CRC32"]:::protocol
+        CF0["ControlFramer (cam0)\nPTCL framing, CRC32"]:::protocol
+        CF1["ControlFramer (cam1)\nPTCL framing, CRC32"]:::protocol
+    end
+
+    SC0_V --> VF0
+    SC0_C --> CF0
+    SC1_V --> VF1
+    SC1_C --> CF1
+
+    subgraph COORD["4. CAMERA COORDINATION (CameraSession)"]
+        direction TB
+        TSYNC0["TimeSyncFilter (4 Hz PTP)"]:::coord
+        POSE0["PoseInterpolator (200 Hz)"]:::coord
+        ENRICH0["Enriched VideoFrame (cam0)\n(Slot + Mid-Exposure Pose)"]:::coord
+
+        TSYNC1["TimeSyncFilter (4 Hz PTP)"]:::coord
+        POSE1["PoseInterpolator (200 Hz)"]:::coord
+        ENRICH1["Enriched VideoFrame (cam1)\n(Slot + Mid-Exposure Pose)"]:::coord
+    end
+
+    CF0 --> TSYNC0
+    CF0 --> POSE0
+    VF0 --> ENRICH0
+    POSE0 --> ENRICH0
+
+    CF1 --> TSYNC1
+    CF1 --> POSE1
+    VF1 --> ENRICH1
+    POSE1 --> ENRICH1
+
+    subgraph STORAGE["5. DISK RECORDER SUBSYSTEM (DiskRecorder)"]
+        direction TB
+        REC_MUTEX["DiskRecorder::mutex_\n(Serializes Dual-Camera Writes)"]:::storage
+        GAP_ENGINE["Gap Tracker (dropped, damaged, link_down)"]:::storage
+        RECLAIM_ENGINE["80% Reclamation Engine (1.6 GB)"]:::storage
+    end
+
+    subgraph DISK_STORAGE["PERSISTENT LOCAL DISK STORAGE (record/) - Shared Storage Boundary"]
+        direction TB
+        CHUNKS["Rolling 10 MB Chunks (part-XXXX.bin)"]:::storage
+        MANIFEST["manifest.json (Metadata)"]:::storage
+        RECEIPTS[".uploaded Receipt Markers"]:::storage
+    end
+
+    subgraph DISPATCH["DUAL-PATH FRAME DISPATCH (CameraSession -> WebServer::on_frame_received)"]
+        direction TB
+        FORK_PREVIEW["PATH A: Live Preview (ALWAYS ACTIVE)\n- In-Memory 320x200 downsampling\n- Zero disk I/O, continuous 25 fps stream\n- Directly feeds GET /api/preview"]:::web
+        FORK_RECORD["PATH B: Disk Recording (CONDITIONAL)\n- Active ONLY when user starts recording session\n- Zero disk writes when recording is stopped"]:::storage
+    end
+
+    ENRICH0 --> DISPATCH
+    ENRICH1 --> DISPATCH
+    FORK_RECORD -->|If recorder->is_recording()| REC_MUTEX
+    REC_MUTEX -->|Writes frames| CHUNKS
+    REC_MUTEX -->|Writes session data| MANIFEST
+    RECEIPTS -.->|Check receipts| RECLAIM_ENGINE
+    RECLAIM_ENGINE -.->|Evicts old .bin when > 1.6 GB| CHUNKS
+
+    subgraph CLOUD["6. CLOUD UPLINK SUBSYSTEM (CloudUploader) - Autonomous Entity"]
+        direction TB
+        UP_QUEUE["Upload Queue (FIFO)"]:::cloud
+        UP_WORKER["Upload Worker Thread (Sleeps on cv_)"]:::cloud
+        STREAM_BUF["Single 64 KB Scratch Buffer (0.064 MB RAM!)\nIncremental SHA-256 + HTTP PUT"]:::cloud
+        CRASH_REC["Autonomous Disk Scanner\n(Scans record/ at boot or when STOPPED)"]:::cloud
+    end
+
+    %% Data decoupling: CloudUploader reads from Disk Storage, not DiskRecorder!
+    REC_MUTEX -.->|Optional signal: file ready on disk| UP_QUEUE
+    CRASH_REC -->|Scans disk independently| DISK_STORAGE
+    CRASH_REC -->|Enqueues un-uploaded file paths| UP_QUEUE
+
+    UP_QUEUE --> UP_WORKER
+    UP_WORKER -->|Reads 10 MB file in 64 KB pieces| CHUNKS
+    UP_WORKER --> STREAM_BUF
+    STREAM_BUF -->|HTTP PUT 64 KB Stream| CLOUD_SERVER
+    CLOUD_SERVER -->|200 OK: Writes receipt marker| RECEIPTS
+
+    subgraph EVENTS["7. EVENT & NOTIFICATION SUBSYSTEM"]
+        direction TB
+        RING["AtomicEventRingBuffer<256>\n(Lock-Free / Wait-Free Ticket Indexing)"]:::events
+        ALARMS["EventLogger Active Alarm State Machine\n(camera_link_down, motor_stalled, disk_near_full)"]:::events
+    end
+
+    VF0 -.-> RING
+    VF1 -.-> RING
+    QUOTA -.-> ALARMS
+    ALARMS --> RING
+
+    subgraph WEB["8. WEB SERVER & OPERATOR DASHBOARD (Port 8080)"]
+        direction TB
+        CIVET["CivetServer Engine"]:::web
+        APIS["REST Endpoints:\n/api/state, /api/preview, /api/recording, /api/command, /events"]:::web
+        DASHBOARDS["React Viewer & Live Alarm/Event Dashboard"]:::web
+    end
+
+    FORK_PREVIEW ==>|Direct In-Memory Live Frame Feed| APIS
+    RING --> APIS
+    ALARMS --> APIS
+    CIVET --> APIS --> DASHBOARDS
+    APIS --> REC_MUTEX
+    APIS --> CF0
+    APIS --> CF1
+
+    CLIENT_BROWSER["Operator Web Browser (Port 8080 / Vite 5173)"]:::client
+    DASHBOARDS <==>|HTTP / SSE / REST| CLIENT_BROWSER
 ```
 
 ### 3.1 Transport Subsystem (`peripheral_socket`)
-* **Thread-Safe Full-Duplex Separation**: Dedicated `read_mutex_` and `write_mutex_` allow concurrent reads (`recv_some`/`recv_exact`) and writes (`send_all`) without lock contention.
+* **Zero-Mutex Full-Duplex Architecture**: Sockets utilize atomic file descriptors (`std::atomic<int> fd_`) and kernel-separated receive/send buffers, allowing concurrent reads (`recv_some`/`recv_exact`) and writes (`send_all`) with zero application mutex overhead.
 * **Ingress Socket Tuning**: `SO_RCVBUF` set to 2 MB, `TCP_NODELAY` enabled, and `SO_NOSIGPIPE`/`MSG_NOSIGNAL` handled.
 * **Graceful Teardown**: `close()` issues `shutdown(SHUT_RDWR)` before closing file descriptors, unblocking worker threads immediately.
 

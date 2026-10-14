@@ -222,9 +222,11 @@ private:
 class FrameMemoryPool {
 public:
     struct Config {
-        size_t total_slots{64};                 // e.g. 64 slots total (~41.6 MB)
-        size_t slot_size{650 * 1024};           // 650 KB per slot (fits 1000x625 + header)
         size_t endpoint_count{2};               // e.g. 2 cameras (cam0, cam1)
+        size_t slots_per_endpoint{32};          // Default 32 slots per camera
+        size_t slot_size{650 * 1024};           // 650 KB per slot (fits 1000x625 + header)
+        size_t total_slots{0};                  // 0 = auto-compute (endpoint_count * slots_per_endpoint)
+        uint64_t max_pool_memory_bytes{0};      // 0 = auto-detect safe ceiling (< 100 MB under 250 MB ceiling)
     };
 
     explicit FrameMemoryPool(Config config);
@@ -242,10 +244,16 @@ public:
     }
     [[nodiscard]] size_t slots_per_endpoint() const noexcept { return slots_per_endpoint_; }
     [[nodiscard]] size_t endpoint_count() const noexcept { return partitions_.size(); }
+    [[nodiscard]] uint64_t max_pool_memory_bytes() const noexcept { return safe_memory_ceiling_; }
+
+    /// Helper to detect host/container memory and calculate safe frame pool memory budget
+    static uint64_t detect_system_memory_bytes();
+    static uint64_t safe_max_pool_memory_bytes(uint64_t sys_mem_bytes);
 
 private:
     Config config_;
     size_t slots_per_endpoint_{0};
+    uint64_t safe_memory_ceiling_{0};
     std::vector<uint8_t> storage_;
     std::vector<std::unique_ptr<FramePoolPartition>> partitions_;
 };

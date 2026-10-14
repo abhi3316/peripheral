@@ -77,7 +77,7 @@ peripheral/
 ## What Has Been Implemented So Far
 
 ### 1. `peripheral_socket` Static Library
-* **Thread-Safe Full-Duplex I/O**: Distinct `read_mutex_` and `write_mutex_` enable simultaneous reads (`recv_some` / `recv_exact`) and writes (`send_all`) without lock contention.
+* **Zero-Mutex Full-Duplex Architecture**: Utilizes atomic file descriptors and kernel-separated read/write buffers, enabling concurrent reads (`recv_some` / `recv_exact`) and writes (`send_all`) with zero application mutex overhead.
 * **High-Throughput Ingress Tuning**: Configures `SO_RCVBUF` to 2 MB by default, disabling Nagle's algorithm (`TCP_NODELAY`), and handling `SO_NOSIGPIPE` / `MSG_NOSIGNAL` to prevent process termination on socket disconnects.
 * **Non-Blocking Connect & Timeouts**: Robust `poll()`-based I/O multiplexing with millisecond-precision timeouts.
 * **Graceful Cancellation**: `close()` issues `shutdown(SHUT_RDWR)` before closing file descriptors, immediately unblocking any in-flight reads in worker threads.

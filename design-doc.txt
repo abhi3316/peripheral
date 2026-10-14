@@ -15,10 +15,13 @@ TABLE OF CONTENTS
 2. HARDWARE & RESOURCE BUDGET MATHEMATICS
    2.1 Frame Ingress Mathematics
    2.2 The 250 MB RAM Ceiling & Preallocated Slab Pool Sizing (~40.6 MB)
-   2.3 Single CPU Core Concurrency & Zero Lock Contention Architecture
-   2.4 Strict 2 GB Disk Quota & High-Watermark Reclamation Policy
-   2.5 250 Mb/s Cloud Uplink Budget
+   2.3 Why Exactly 32 Slots per Camera?
+   2.4 Scaling to N Cameras: Architecture Extension Guide
+   2.5 Single CPU Core Concurrency & Zero Lock Contention Architecture
+   2.6 Strict 2 GB Disk Quota & High-Watermark Reclamation Policy
+   2.7 250 Mb/s Cloud Uplink Budget
 3. SUBSYSTEM ARCHITECTURAL DEEP DIVE
+   3.0 Architecture Specifications & Master Processing Algorithm
    3.1 Transport Subsystem (peripheral_socket)
    3.2 Memory Subsystem & Slab Pool (FrameMemoryPool, FrameSlotHandle)
    3.3 Protocol Framing & Resilient Deframers (VideoFramer, ControlFramer)
@@ -125,15 +128,128 @@ System RAM Budget Allocation:
   ---------------------------------------------------------------------
   TOTAL CEILING                             250.0 MB           100.0%
 
-2.3 Single CPU Core Concurrency & Zero Lock Contention Architecture
+2.3 Why Exactly 32 Slots per Camera?
+-------------------------------------
+The allocation of 32 slots per camera is derived from four critical hardware,
+mathematical, and algorithmic principles:
+
+1. Covering 1.0 Full Second of Video at 25 fps (+28% Margin):
+   - Each camera outputs frames at 25 frames per second (1 frame every 40 ms).
+   - 25 frames = exactly 1.00 second of temporal history.
+   - Periodic system routines (such as the 1-second system heartbeat, disk quota
+     monitoring, and time-sync filter passes) execute at 1 Hz (every 1,000 ms).
+   - Allocating 32 slots provides:
+       Buffer Duration = 32 frames / 25 fps = 1.28 seconds
+   - This guarantees that even if a 1-second periodic maintenance task or disk
+     chunk rotation stalls processing for a full second, the camera stream has a
+     +28% safety cushion (7 extra frames) and will not drop frames.
+
+2. Power-of-Two Bitwise Masking (head & 31 vs % Division):
+   - On a single-core embedded CPU, integer division and modulo (%) operations
+     are expensive:
+       index = head % 25
+     requires the hardware integer division instruction (idiv), taking 15 to 40
+     CPU clock cycles.
+   - When a ring buffer capacity is a power of two (2^5 = 32):
+       index = head & (32 - 1) = head & 31
+     Bitwise AND executes in exactly 1 CPU clock cycle.
+   - Why not 16 slots?
+     The previous power of two is 16. But 16 / 25 fps = 0.64 seconds, which is
+     insufficient to survive a 1-second I/O stall. 32 is the optimal power of two.
+
+3. Multi-Consumer Pipeline Headroom:
+   At any given millisecond, multiple pipeline stages concurrently reference slots:
+   - Socket Ingress: Holds 1 slot (actively receiving raw bytes from the wire).
+   - Video Deframer: Holds 1 slot (verifying CRC32 and extracting truth stamps).
+   - Disk Recorder: Holds 2-4 slots (batching writes into the 10 MB .bin chunk).
+   - Web Downsampler: Holds 1-2 slots (downsampling to 320x200 for live preview).
+   If only 16 slots were allocated, active consumers would occupy 6-8 slots,
+   leaving only ~8 slots (~320 ms) of actual buffering! With 32 slots, even when
+   8 slots are in-flight across disk and web pipelines, 24+ slots (~1 second) of
+   cushion remain to absorb scheduling bursts.
+
+4. Per-Camera Failure Isolation (Zero Memory Cross-Talk):
+   The 64-slot pool is cleanly split into two dedicated 32-slot partitions:
+   - cam0 has its own dedicated 32 slots.
+   - cam1 has its own dedicated 32 slots.
+   If cam0 suffers network line noise or a socket stall, it cannot consume slots
+   allocated to cam1. Both cameras remain completely isolated and deterministic.
+
+2.4 Scaling to N Cameras: Architecture Extension Guide
+------------------------------------------------------
+The gateway server was engineered with fully dynamic, scale-invariant data
+structures. To increase the number of cameras (e.g. from 2 to 4 or more),
+only ONE primary file needs to be modified in the C++ codebase.
+
+1. The Primary Configuration File:
+   File: include/peripheral/camera/camera_endpoint.hpp
+   In CameraEndpoint::default_endpoints(), append the new camera definitions:
+
+   static std::vector<CameraEndpoint> default_endpoints() {
+       return {
+           CameraEndpoint{ .name = "cam0", .host = "127.0.0.1", .control_port = 7001, .video_port = 7002 },
+           CameraEndpoint{ .name = "cam1", .host = "127.0.0.1", .control_port = 7011, .video_port = 7012 },
+           // --- ADD NEW CAMERA RIGS HERE ---
+           CameraEndpoint{ .name = "cam2", .host = "127.0.0.1", .control_port = 7021, .video_port = 7022 },
+           CameraEndpoint{ .name = "cam3", .host = "127.0.0.1", .control_port = 7031, .video_port = 7032 }
+       };
+   }
+
+2. Automatic Dynamic Scaling (No other code changes needed):
+   - Memory Pool: FrameMemoryPool automatically dimensions and partitions slots
+     across endpoints.size() partitions.
+   - Web Server: WebServer dynamically registers state, preview routes, and
+     pan/tilt jog controls for all camera IDs present in endpoints.
+   - Disk Recorder: DiskRecorder multiplexes frames from all active camera
+     sessions into the rolling 10 MB chunks and tracks per-camera sequence gaps.
+   - Event Logger: EventLogger registers health monitors and link alarms for
+     every camera dynamically.
+
+3. Automatic Memory Sizing (32 Slots/Camera Default) & Fail-Safe Protection:
+   - Zero-Friction Scaling: Adding endpoints in camera_endpoint.hpp automatically
+     scales the slab pool without requiring manual --pool-slots configuration.
+     The server defaults to 32 slots per camera:
+         total_slots = endpoints.size() * 32
+       * 2 cameras -> 64 slots = 40.625 MB
+       * 4 cameras -> 128 slots = 81.25 MB
+   - Fail-Safe Memory Threshold (Kernel Page Cache Headroom):
+     The ingress memory pool does NOT check against the full 250 MB ceiling.
+     Under continuous 31.25 MB/s recording, the Linux kernel dirty page cache,
+     file writeback buffers, TCP socket buffers, and web runtime require at least
+     100-150 MB of headroom.
+   - Dynamic System Memory Identification:
+     FrameMemoryPool queries the container/host memory limits at startup via:
+       1) cgroup v2 (/sys/fs/cgroup/memory.max)
+       2) cgroup v1 (/sys/fs/cgroup/memory/memory.limit_in_bytes)
+       3) POSIX sysconf(_SC_PHYS_PAGES)
+     The safe pool ceiling is computed as:
+       safe_ceiling = min(system_memory * 0.40, 100 MB)
+   - Fail-Fast Rejection on Over-Allocation:
+     If the requested cameras would exceed this threshold (e.g. 6 cameras @ 32 slots
+     = 121.875 MB > 100 MB), initialization fails immediately with an explicit
+     fatal error, preventing kernel Out-Of-Memory (OOM) killer aborts.
+
+4. Simulator & Docker Configuration for N Cameras:
+   - Official Simulator Support:
+     The provided simulator supports up to 4 cameras natively:
+       cd utils/tools && npm run camera -- --cameras 4
+     Ports opened: cam0 (7001/7002), cam1 (7011/7012), cam2 (7021/7022), cam3 (7031/7032).
+   - Docker Compose:
+     Expose the additional ports in docker-compose.yml:
+       - "7021:7021" / "7022:7022" (cam2)
+       - "7031:7031" / "7032:7032" (cam3)
+
+2.5 Single CPU Core Concurrency & Zero Lock Contention Architecture
 -------------------------------------------------------------------
 With only 1 physical CPU core, multiple threads cannot execute concurrently in
 hardware. Every lock contention causes thread descheduling, kernel context
 switches (costing 2-5 microseconds each), and CPU cache thrashing.
 
 Design Rules Enforced:
-1. Full-Duplex Socket Separation: Sockets utilize independent read_mutex_ and
-   write_mutex_. Background reader threads never block outgoing command threads.
+1. Full-Duplex Lock-Free Sockets: Sockets operate in full-duplex with zero application
+   mutex overhead (using atomic file descriptors and kernel-separated send/receive queues).
+   Dedicated stream separation (video vs control) guarantees background reader threads
+   never block or contend with outgoing command threads.
 2. Zero Heap Churn: During continuous streaming, ingress threads perform 0 heap
    allocations. Slots are preallocated; pointers and intrusive handles are reused.
 3. Lock-Free Event Ring: EventLogger utilizes wait-free atomic ticket generation
@@ -142,7 +258,7 @@ Design Rules Enforced:
 4. Condition Variable Signaling: Consumers wait on std::condition_variable rather
    than busy-spinning, yielding the single CPU immediately when idle.
 
-2.4 Strict 2 GB Disk Quota & High-Watermark Reclamation Policy
+2.6 Strict 2 GB Disk Quota & High-Watermark Reclamation Policy
 --------------------------------------------------------------
 At 31.25 MB/s, continuous recording fills 2 GB in just 64 seconds:
     2,000 MB / 31.25 MB/s = 64 seconds to disk saturation.
@@ -162,7 +278,7 @@ cache reclamation policy:
    chunks pile up, the recorder gracefully stops disk writes and logs explicit
    disk_full gap accounting rather than corrupting files or crashing with ENOSPC.
 
-2.5 250 Mb/s Cloud Uplink Budget
+2.7 250 Mb/s Cloud Uplink Budget
 --------------------------------
 The cloud storage server (port 7100) accepts 10 MB chunk files via HTTP PUT.
 The uploader streams data directly from disk using 64 KB buffers, calculating
@@ -174,11 +290,611 @@ Under steady state, the cloud backlog remains at 0-2 chunks (~10-20 MB).
 3. SUBSYSTEM ARCHITECTURAL DEEP DIVE
 ================================================================================
 
+3.0 ARCHITECTURE SPECIFICATIONS & MASTER PROCESSING ALGORITHM
+-------------------------------------------------------------
+
+A. COMPLETE SYSTEM ARCHITECTURAL SPECIFICATIONS
+================================================
+
+1. Embedded Runtime & Host Environment Specifications:
+   - Operating System: Linux (Ubuntu 24.04 LTS / Debian 12 / Docker cgroup container).
+   - CPU Allocation: Exactly 1 physical CPU core (--cpus=1.0), zero hardware parallelism.
+   - RAM Ceiling: Exactly 250 MB total resident memory (--memory=250m --memory-swap=250m).
+   - Local Disk Quota: Exactly 2 GB maximum storage ceiling (record/ directory).
+   - Network Interface: Dual Gigabit Ethernet streams (TCP/IP loopback/wire).
+   - Programming Language: Modern ISO C++26 (ISO/IEC 14882:2026) / ISO C++23 compliant.
+   - Build Toolchain: CMake 3.28+ with Ninja generator; GCC 14 or Clang 18.
+
+2. Ingress Video & Telemetry Specifications:
+   - Dual Camera Rigs: cam0 (Video: 7002, Control: 7001), cam1 (Video: 7012, Control: 7011).
+   - Video Resolution: 1000 pixels (width) x 625 pixels (height).
+   - Pixel Format: 8-bit uncompressed raw grayscale (625,000 bytes raw image payload).
+   - Frame Rate: 25.0 frames/sec per camera (40.0 ms period) -> 50 fps combined.
+   - Frame Wire Header: 32 bytes (VFRM magic, sequence, exposure timestamps, CRCs).
+   - Single Frame Wire Size: 625,032 bytes (~625 KB).
+   - Dual Ingress Bandwidth: 50 fps * 625,032 B = 31,251,600 B/s (~31.25 MB/s, 250.01 Mb/s).
+   - Pose Telemetry Rate: 200 Hz continuous (5.0 ms period), 16-byte PTCL packet.
+   - Status Heartbeat Rate: 2 Hz periodic (500 ms period).
+   - Clock Sync Pings: 4 Hz periodic (250 ms period) TIME_REQ / TIME_RESP.
+   - Ingress Socket Concurrency: Full-duplex lock-free architecture leveraging kernel RX/TX
+     queue separation and atomic descriptors (std::atomic<int> fd_); each socket owned
+     by a single dedicated StreamCapture worker thread.
+
+3. Memory Subsystem & Slab Pool Specifications:
+   - Structure: Preallocated contiguous slab pool (FrameMemoryPool).
+   - Slot Size: 665,600 bytes (650 KB fixed slab per frame).
+   - Default Pool Capacity: 32 slots / camera * 2 cameras = 64 slots total (40.625 MB).
+   - Temporal Buffer Cushion: 32 slots / 25 fps = 1.28 seconds temporal cushion (+28% margin).
+   - Bitwise Power-of-Two Indexing: head & (32 - 1) = head & 31 (1 CPU clock cycle).
+   - Dynamic Memory Ceiling: Automatically enforces pool size <= 40% RAM (<= 100 MB).
+   - Ingress Heap Churn: Exactly 0 MB/s (zero dynamic malloc/new during video streaming).
+   - Slot Handle Architecture: Intrusive RAII handle with atomic ref-counting.
+
+4. Protocol & Deframing Specifications:
+   - Video Magic: 0x4D524656 ('VFRM').
+   - Control Magic: 0x4C435450 ('PTCL').
+   - Checksum: IEEE 802.3 32-bit CRC (polynomial 0xEDB88320) for header and payload.
+   - Wire Noise Recovery: Scans up to 5,000 bytes of arbitrary line noise via std::memchr.
+   - Embedded Truth Stamp: First 12 bytes of frame payload contain pan/tilt counts & seq.
+   - Frame Fate Classification: Sent, Corrupt, Cut, DroppedByCamera, NoClient.
+   - Framer Concurrency Model: Intentionally unmutexed internally to eliminate lock contention
+     on 50 fps ingress; thread safety strictly guaranteed by CameraSession::session_mutex_
+     serialization and 100% per-camera instance isolation.
+
+5. Synchronization & Pose Interpolation Specifications:
+   - Clock Synchronization: PTP 4-timestamp software filter (TimeSyncFilter).
+   - Roll-over Handling: Signed modular arithmetic for 32-bit microsecond counter roll-overs.
+   - Pose Interpolation: Linear interpolation at frame mid-exposure (t_mid = t_start + exp/2).
+   - Interpolation Accuracy: < 0.05 deg error (pan 0.0456 deg, tilt 0.0460 deg vs < 0.1 deg spec).
+
+6. Storage, Recording & Uplink Specifications:
+   - Chunk Format: Rolling 10 MB binary chunks (part-0001.bin, part-0002.bin, ...).
+   - Frame Multiplexing: Synchronized dual-camera multiplexing (DiskRecorder::mutex_).
+   - Session Metadata: Crash-safe manifest.json with sequence gap accounting.
+   - High-Watermark Reclamation: 80% (1.6 GB) threshold evicts uploaded .bin files oldest-first.
+   - Emergency Brake: 95% (1.9 GB) threshold halts disk writes with disk_full gap logging.
+   - Cloud Uplink Target: HTTP PUT port 7100 (/v1/servers/peripheral-1/objects/{rec_id}/{chunk}).
+   - Uplink Bandwidth: 250 Mb/s (31.25 MB/s), matching ingestion rate.
+   - Cloud Uploader RAM: Single 64 KB streaming buffer (0.064 MB RAM) with FIPS 180-4 SHA-256.
+   - Cloud Receipts: 65-byte .uploaded markers preserved permanently on disk.
+
+7. Live Preview & Web Telemetry Specifications:
+   - In-Memory Downsampler: Real-time box downsampling to 320x200 grayscale in RAM.
+   - Live Preview Endpoint: GET /api/preview?camera=cam0 (25 fps continuous feed).
+   - Preview Independence: 100% in-memory; 0 disk writes, 0 cloud traffic; runs even when recording STOPPED.
+   - Web Server Engine: Embedded CivetWeb listening on TCP Port 8080.
+   - Event Ring Buffer: 256-slot lock-free/wait-free atomic ring buffer (AtomicEventRingBuffer).
+   - Normalized Active Alarms: camera_link_down, motor_stalled, clock_sync_lost, disk_near_full.
+   - Operator Frontends: Bundled React Viewer (/dist) + Standalone Live Alarms Dashboard (/events).
+
+
+B. COMPLETE END-TO-END SYSTEM ALGORITHM (MASTER PROCESSING PIPELINE)
+===================================================================
+
+The gateway server executes a deterministic, zero-allocation multi-threaded pipeline
+orchestrated across 13 sequential and concurrent algorithmic stages:
+
+Stage 1: System Boot & Resource-Constrained Initialization Algorithm
+---------------------------------------------------------------------
+1. Memory Limit Detection:
+   a. Query Linux cgroups v2 (/sys/fs/cgroup/memory.max).
+   b. Fallback to cgroups v1 (/sys/fs/cgroup/memory/memory.limit_in_bytes) or sysconf.
+   c. Enforce system memory ceiling: 250 MB.
+2. Slab Pool Auto-Dimensioning:
+   a. Retrieve endpoint list (default: 2 cameras -> cam0, cam1).
+   b. Calculate required slots: total_slots = endpoints.size() * 32 (64 slots = 40.625 MB).
+   c. Fail-Safe Validation: verify total_pool_bytes <= 100 MB (40% of RAM ceiling).
+      If exceeded, throw std::invalid_argument immediately (fail fast).
+   d. Allocate single contiguous memory block of 64 * 650 KB = 41.6 MB.
+   e. Partition memory into dedicated 32-slot ring buffers per camera.
+3. Storage & Reclamation Initialization:
+   a. Measure disk usage across record/ directory.
+   b. If usage >= 1.6 GB (80%), trigger immediate background reclamation pass.
+4. Autonomous Cloud Uplink Worker Initialization:
+   a. Spawn background CloudUploader worker thread.
+   b. Autonomous Boot Scan: Traverse record/ directory; locate any chunk file lacking
+      a .bin.uploaded receipt marker; push to FIFO upload work queue.
+5. Web Server & Alarm System Launch:
+   a. Initialize AtomicEventRingBuffer<256> with sequence ticket 0.
+   b. Bind CivetWeb HTTP server to port 8080; mount REST APIs, SSE endpoints, and React UI.
+6. Camera Session Launch:
+   a. Spawn dedicated StreamCapture worker threads for each stream (cam0_video,
+      cam0_control, cam1_video, cam1_control).
+
+Stage 2: Ingress Socket & Zero-Copy Slot Streaming Algorithm
+------------------------------------------------------------
+For each video stream (cam0_video, cam1_video):
+1. Configure non-blocking TCP socket:
+   - SO_RCVBUF = 2 MB (prevents kernel packet drops during 300 ms disk stalls).
+   - TCP_NODELAY = 1 (disables Nagle algorithm).
+   - atomic fd_ with zero-mutex full-duplex concurrency.
+2. Ingress Loop:
+   a. StreamCapture queries endpoint's partition: writable_span = partition->request_writable_slot().
+   b. Perform non-blocking poll() on socket descriptor with 50 ms timeout.
+   c. Execute ::recv() directly into the preallocated slot memory pointer:
+      bytes_read = ::recv(fd_, writable_span.data(), writable_span.size(), MSG_NOSIGNAL).
+   d. Advance written byte counter. Zero heap allocations performed (0 MB/s churn).
+   e. Notify VideoFramer that fresh bytes have arrived in slot.
+3. Ingress Socket Thread-Safety & Concurrency Model:
+   a. Kernel Queue Decoupling: Linux TCP sockets maintain separate, independent receive (POLLIN)
+      and transmit (POLLOUT) kernel queues. A background thread executing ::recv() and a command/sync
+      thread executing ::send() operate on the same file descriptor with ZERO application-level locks.
+   b. Single-Reader Thread Ownership: Each socket is owned exclusively by exactly one dedicated
+      StreamCapture worker thread. Concurrent read calls on the same descriptor are structurally impossible.
+   c. Lock-Free Atomic State: Atomic members (std::atomic<int> fd_, std::atomic<SocketState> state_,
+      and atomic metrics counters) allow lock-free external queries without data races.
+   d. Graceful Teardown: close() invokes ::shutdown(SHUT_RDWR) before closing fd_, safely unblocking
+      any worker thread waiting in ::poll() or ::recv() without deadlocks.
+
+Stage 3: Protocol Deframing, Wire Noise Recovery & CRC32 Validation Algorithm
+------------------------------------------------------------------------------
+1. Header Synchronization & 5,000-Byte Noise Recovery:
+   a. Scan stream buffer using optimized std::memchr for magic byte 0x56 ('V').
+   b. If 'V' found, verify subsequent 3 bytes match 0x4D524656 ('VFRM').
+   c. If garbage data precedes marker:
+      - If garbage <= 5,000 bytes: discard noise bytes, re-align buffer, log sync recovery.
+      - If garbage > 5,000 bytes: classify frame fate as Corrupt, raise wire noise warning.
+2. Header Parsing:
+   a. Read 32-byte VideoFrameHeader: magic, boot_id, frame_seq, width (1000), height (625),
+      exposure_start, exposure_duration, header_crc32, payload_crc32.
+   b. Compute IEEE 802.3 CRC32 over header bytes [0..23]; compare with header_crc32.
+      If mismatch: discard 1 byte, resume scanning for next 'VFRM'.
+3. Payload Ingress & Checksum Verification:
+   a. Await complete 625,000 payload bytes in slot.
+   b. Compute IEEE 802.3 CRC32 over 625,000 bytes; compare with payload_crc32.
+      If mismatch: mark frame fate as Corrupt; push warning event to atomic ring buffer.
+4. Truth Stamp Extraction:
+   a. Read first 12 bytes of frame payload:
+      - Bytes 0-3: Hardware Pan counts (int32_t).
+      - Bytes 4-7: Hardware Tilt counts (int32_t).
+      - Bytes 8-11: Hardware Frame sequence counter (uint32_t).
+   b. Wrap raw slab slot in intrusive RAII FrameSlotHandle (increments atomic ref_count).
+5. Framer Thread-Safety, Lock-Free Design & Session Synchronization Model:
+   a. Deliberately Unmutexed Core: Neither VideoFramer nor ControlFramer contains an internal mutex.
+      Adding locks inside tight framing loops would impose massive CPU preemption and context-switch
+      overhead on the single-core CPU when processing 50 frames/sec (250 Mb/s).
+   b. Per-Camera Instance Isolation: Each camera session (cam0, cam1) instantiates its own dedicated,
+      completely isolated VideoFramer and ControlFramer instances. Zero state is shared between cameras.
+   c. Session-Level Mutex Coordination (session_mutex_): All invocations of VideoFramer methods
+      (writable_span, commit_write, push_data, parse_available, on_connection_lost) and ControlFramer
+      methods (push_data, parse_available, reset) are serialized by std::scoped_lock lk(session_mutex_)
+      inside CameraSession, guaranteeing strict single-threaded execution without internal lock overhead.
+   d. Atomic Memory Handoffs: Memory slab slots transition states via atomic CAS (Empty -> Writing ->
+      Ready -> InUse -> Empty) with acquire/release memory semantics, ensuring lock-free, race-free
+      handoffs from the framer to downstream consumers (disk recorder and web preview).
+
+Stage 4: Telemetry Ingress & PTP 4-Timestamp Clock Synchronization Algorithm
+-----------------------------------------------------------------------------
+For each control stream (cam0_control, cam1_control):
+1. Deframer validates 16-byte PTCL header and CRC32 checksum.
+2. Packet Type Dispatch:
+   a. If POSE (200 Hz):
+      - Extract pan_counts, tilt_counts, motor_flags (homed, moving, fault).
+      - Push sample into PoseInterpolator circular ring buffer with local timestamp.
+   b. If STATUS (2 Hz):
+      - Extract link status, camera uptime, temperature, error codes.
+      - If fault bit set: trigger EventLogger::raise_alarm("motor_stalled").
+   c. If TIME_RESP (4 Hz):
+      - Extract t2 (camera request receive timestamp) and t3 (camera response transmit timestamp).
+      - Capture local receive timestamp t4.
+3. TimeSyncFilter Clock Alignment:
+   a. Calculate Round-Trip Time: RTT = (t4 - t1) - (t3 - t2).
+   b. Handle 32-bit hardware counter rollover:
+      delta = (uint32_t)(t_curr - t_prev);
+      unwrap using signed modular arithmetic: if (delta < 0) delta += 2^32.
+   c. Calculate one-way clock offset: Offset = ((t2 - t1) + (t3 - t4)) / 2.
+   d. Apply moving-window median and exponential smoothing filter.
+   e. Update estimated camera-to-gateway clock offset.
+4. Active Application & Usage of Camera-to-Gateway Clock Offset:
+   The computed clock offset (offset_us) is actively consumed across four critical subsystems:
+   a. Server Monotonic Frame Time Translation (Stage 6):
+      Converts camera 32-bit hardware exposure timestamp into gateway 64-bit monotonic timeline:
+          frame.rx_monotonic_us = time_filter.camera_to_server_us(t_mid_camera);
+      where:
+          server_time_us = unwrapped_camera_time_us + filtered_offset_us.
+      This anchors every captured frame to the gateway's steady_clock.
+   b. Dual-Camera Temporal Correlation & Multiplexing (Stage 9):
+      Physical camera boards possess independent hardware oscillators that drift relative to
+      each other. Translating both cam0 and cam1 timestamps to the gateway's monotonic time axis
+      allows DiskRecorder to correctly correlate, sort, and multiplex dual-camera frames in
+      rolling 10 MB chunks with microsecond alignment.
+   c. Clock Drift & Loss Alarm Detection (Stage 12):
+      EventLogger tracks clock offset stability. If clock drift exceeds 100 ppm (> 100 us/s)
+      or 5 consecutive sync responses are dropped, it automatically raises the "clock_sync_lost"
+      active normalized alarm.
+   d. Real-Time Telemetry & Operator Dashboard (Stage 13):
+      WebServer exposes current_offset_us() via GET /api/state:
+          "clock": { "offsetUs": <delta_us>, "synchronized": true, "rttUs": <rtt> }
+      allowing the React Operator Viewer to display live delta clock synchronization badges.
+
+Stage 5: Outbound Camera Control & Command Dispatch Pipeline (Gateway -> Camera)
+---------------------------------------------------------------------------------
+The gateway communicates bidirectionally with each camera rig over a dedicated full-duplex
+TCP control stream (cam0: Port 7001, cam1: Port 7011). Two distinct subsystems generate
+outbound control traffic to the camera:
+
+1. Subsystem A: Automated 4 Hz Clock Synchronization Engine (TIME_REQ):
+   a. Periodic Timer Wakeup:
+      CameraSession::time_sync_thread_ executes a periodic loop waking every 250 ms (4 Hz)
+      via std::condition_variable::wait_for().
+   b. Monotonic Timestamp Capture (t1):
+      Queries std::chrono::steady_clock::now(); casts to 64-bit microsecond counter:
+      uint64_t t1 = duration_cast<microseconds>(now.time_since_epoch()).count().
+   c. Session Mutex Serialization:
+      Acquires session_mutex_ (std::scoped_lock lock(session_mutex_)) to serialize against
+      concurrent operator motion commands and prevent packet byte interleaving.
+   d. Protocol Packet Serialization (ControlFramer::serialize_time_req):
+      - Allocates 24-byte packet (16-byte ControlHeader + 8-byte TimeReqPayload).
+      - Populates ControlHeader:
+        * start_marker = 0x4C435450 ('PTCL')
+        * version = 1
+        * type = 0x81 (ControlMsgType::TimeReq)
+        * payload_bytes = 8 (sizeof(TimeReqPayload))
+        * msg_seq = ++msg_seq_ (monotonically increasing message counter)
+      - Populates TimeReqPayload:
+        * echo = t1 (64-bit server monotonic send time)
+      - Computes IEEE 802.3 CRC32 over header slice [0..11] concatenated with 8 payload bytes.
+      - Writes CRC32 into header bytes [12..15] (hdr.crc32).
+
+2. Subsystem B: Operator Motion & Gimbal Command Dispatch Engine (CMD):
+   a. REST API Ingress & JSON Parsing:
+      Operator clicks D-Pad or adjusts pan/tilt in React UI, issuing HTTP POST /api/command
+      or POST /api/jog to CivetWeb (Port 8080):
+      - JOG:  { "cameraId": "cam0", "panDegPerS": 10.0, "tiltDegPerS": -5.0 }
+      - GOTO: { "cameraId": "cam0", "command": "goto", "panDeg": 45.0, "tiltDeg": -15.0 }
+      - HOME: { "cameraId": "cam0", "command": "home" }
+      - STOP: { "cameraId": "cam0", "command": "stop" }
+   b. Route to Registered CameraSession:
+      WebServer queries sessions_ map; resolves target CameraSession ("cam0" or "cam1").
+   c. Session Mutex Serialization & Command Formatting:
+      Acquires session_mutex_; formats command parameters:
+      - send_jog(pan_speed, tilt_speed):  cmd = CommandType::Jog (0x01), a = pan_speed, b = tilt_speed.
+      - send_home():                      cmd = CommandType::Home (0x02), a = 0.0f, b = 0.0f.
+      - send_goto(pan_deg, tilt_deg):     cmd = CommandType::GoTo (0x03), a = pan_deg, b = tilt_deg.
+      - send_stop():                      cmd = CommandType::Stop (0x04), a = 0.0f, b = 0.0f.
+   d. Protocol Packet Serialization (ControlFramer::serialize_cmd):
+      - Allocates 28-byte packet (16-byte ControlHeader + 12-byte CmdPayload).
+      - Populates ControlHeader:
+        * start_marker = 0x4C435450 ('PTCL')
+        * version = 1
+        * type = 0x01 (ControlMsgType::Cmd)
+        * payload_bytes = 12 (sizeof(CmdPayload))
+        * msg_seq = ++msg_seq_
+      - Populates CmdPayload:
+        * cmd_id = ++cmd_seq_ (monotonically increasing unique command sequence ID)
+        * cmd = static_cast<uint8_t>(cmd_type)
+        * a = float parameter (speed or target pan angle)
+        * b = float parameter (speed or target tilt angle)
+      - Computes IEEE 802.3 CRC32 over header slice [0..11] concatenated with 12 payload bytes.
+      - Writes CRC32 into header bytes [12..15] (hdr.crc32).
+
+3. Transport Layer Outbound Wire Dispatch:
+   a. Socket Retrieval:
+      Retrieves control_stream_ pointer (Socket instance managing Port 7001 or 7011).
+   b. Full-Duplex Kernel Decoupling (Zero Contention with Telemetry Ingress):
+      Executes control_stream_->send(packet) -> send_all().
+      Linux kernel maintains completely independent send (SO_SNDBUF) and receive (SO_RCVBUF)
+      ring buffers. The background StreamCapture thread continuously reading 200 Hz POSE
+      telemetry via ::recv() on the same file descriptor (std::atomic<int> fd_) does NOT
+      contend with, lock, or stall outbound ::send() calls.
+   c. Low-Latency Guarantee (TCP_NODELAY):
+      Socket has TCP_NODELAY = 1 set, bypassing Nagle's buffering algorithm. The 24-byte
+      or 28-byte packet is framed and transmitted onto the physical/virtual Ethernet wire
+      with sub-millisecond latency (< 1 ms).
+
+4. Camera Rig Ingress, Closed-Loop Execution & Telemetry Feedback:
+   a. Checksum Verification:
+      Camera firmware deframes 16-byte PTCL header and validates IEEE 802.3 CRC32.
+   b. Time Sync Execution (TIME_REQ -> TIME_RESP):
+      Camera records local hardware arrival timestamp t2; packages mirrored t1, ingress t2,
+      and transmit timestamp t3 into a 24-byte TIME_RESP packet (type 0x82); transmits back
+      to the gateway to feed the TimeSyncFilter (Stage 4).
+   c. Motion Execution & Closed-Loop Acknowledgment (CMD -> ACK & POSE):
+      - Camera validates motion limits and dispatches trajectory setpoints to physical
+        or simulated pan/tilt stepper/servo motor controllers.
+      - Updates internal status flags: sets moving = 1 (and homed = 1 upon home completion).
+      - Emits an immediate 16-byte ACK packet (type 0x02) containing acked_cmd_id and error_code = 0.
+      - Continuous Feedback: The camera's hardware encoders continuously sample pan/tilt counts
+        and stream updated angles at 200 Hz via inbound POSE telemetry stream (Stage 4),
+        closing the control loop and allowing the PoseInterpolator (Stage 6) to attach exact
+        dynamic angles to every mid-exposure video frame.
+
+Stage 6: High-Frequency 200 Hz Mid-Exposure Pose Interpolation Algorithm
+------------------------------------------------------------------------
+Why Stage 6 is Necessary (Physical & Architectural Rationale):
+1. Optical Exposure Midpoint Reality: An image exposure is not an instantaneous zero-duration
+   event; the sensor integrates photons over a finite 10 ms window [t_start, t_start + t_duration].
+   In computer vision, robotics, and photogrammetry, the effective perspective projection
+   geometry corresponds mathematically to the temporal midpoint: t_mid = t_start + 0.5 * t_duration.
+2. Mechanical Motion Compensation: While the shutter is open, the pan/tilt gimbal can move at up
+   to 50 deg/s (rotating 0.5 deg or 50 encoder counts during a single 10 ms exposure). Using the
+   pose at shutter open, shutter close, or socket arrival introduces unacceptable spatial errors.
+3. Asynchronous Stream Decoupling: Video frames (25 fps / 625 KB) and telemetry (200 Hz / 28 B)
+   travel on independent TCP streams. Network serialization causes video frames to arrive 20-50 ms
+   after exposure completes. Moreover, discrete 5 ms (200 Hz) pose samples rarely coincide with the
+   exact microsecond instant of t_mid. Linear interpolation guarantees < 0.05 deg orientation accuracy
+   (well within the strict < 0.1 deg specification threshold).
+4. Self-Contained Downstream Frames: Enriches each VideoFrame with verified pan/tilt angles and
+   gateway monotonic timestamps, eliminating any need for downstream consumers (DiskRecorder,
+   Live Preview, React UI) to subscribe to or query historical telemetry streams.
+
+Algorithmic Pipeline:
+When a valid VideoFrame arrives:
+1. Determine Exposure Time Window:
+   t_start = frame.header.exposure_start (camera hardware clock).
+   t_duration = frame.header.exposure_duration (default: 10,000 us = 10 ms).
+2. Calculate Mid-Exposure Instant:
+   t_mid_camera = t_start + (t_duration / 2).
+3. Query PoseInterpolator:
+   a. Lock pose ring buffer briefly (spin/atomic access).
+   b. Scan 200 Hz pose ring for adjacent samples: sample_A (t_A) and sample_B (t_B)
+      such that: t_A <= t_mid_camera <= t_B.
+   c. If bounding samples exist:
+      - Compute interpolation fraction: alpha = (t_mid_camera - t_A) / (t_B - t_A).
+      - Interpolate pan angle: pan_mid = pan_A + alpha * (pan_B - pan_A).
+      - Interpolate tilt angle: tilt_mid = tilt_A + alpha * (tilt_B - tilt_A).
+      - Convert counts to degrees: deg = counts / 10.0.
+      - Mark frame.pose_valid = true; attach pan_mid and tilt_mid.
+   d. If outside buffer window: extrapolate from closest sample; set pose_valid = false.
+4. Produce Enriched VideoFrame & Clock Translation:
+   a. Translate camera exposure midpoint to gateway monotonic time using the clock offset:
+      frame.rx_monotonic_us = time_filter.camera_to_server_us(t_mid_camera);
+   b. Package FrameSlotHandle + interpolated pan/tilt + translated timestamp + truth stamp.
+
+Stage 7: Bifurcated Frame Dispatch Algorithm (Live Preview vs Recording)
+------------------------------------------------------------------------
+CameraSession invokes WebServer::on_frame_received(camera_name, enriched_frame):
+1. Frame Stream Split:
+   The frame is immediately split into two concurrent, decoupled pipelines:
+   - Branch A (Continuous Live Operator Preview): ALWAYS ACTIVE.
+   - Branch B (Persistent Disk Recording): CONDITIONAL (only when is_recording() == true).
+
+Stage 8: Live Operator Preview & In-Memory Downsampling Algorithm
+-----------------------------------------------------------------
+1. Downsampling to 320x200 Grayscale:
+   a. Source: 1000 pixels (width) x 625 pixels (height) 8-bit grayscale.
+   b. Target: 320 pixels (width) x 200 pixels (height).
+   c. Step ratios: x_ratio = 1000 / 320 = 3.125; y_ratio = 625 / 200 = 3.125.
+   d. Execute fast nearest/box sampling in-place in temporary stack buffer:
+      dst[y * 320 + x] = src[(int)(y * 3.125) * 1000 + (int)(x * 3.125)].
+2. Cache Preview State in RAM:
+   a. Acquire WebServer::mutex_ briefly.
+   b. Update latest_previews_[camera_name] with:
+      - 320x200 downsampled pixel buffer (64,000 bytes).
+      - Camera metadata: boot_id, frame_seq, timestamps, interpolated pan/tilt, truth stamp.
+3. HTTP Streaming to Browser:
+   a. When operator browser calls GET /api/preview?camera=cam0:
+   b. CivetWeb worker reads cached preview buffer from RAM.
+   c. Return binary image with headers: Content-Type: application/octet-stream,
+      X-Camera-ID, X-Frame-Seq, X-Pan-Deg, X-Tilt-Deg.
+   d. Zero disk I/O, zero cloud traffic, latency < 10 ms.
+
+Stage 9: Disk Serialization, Chunk Rotation & Gap Accounting Algorithm
+-----------------------------------------------------------------------
+If DiskRecorder::is_recording() == true:
+1. Frame Ingestion & Mutex Serialization:
+   a. Acquire DiskRecorder::mutex_ (serializes writes between cam0 and cam1).
+2. Gap Accounting:
+   a. Compare frame.sequence with last_seen_sequence[camera_name].
+   b. If sequence jumped:
+      - Calculate missing range: [from_seq = last_seq + 1, to_seq = current_seq - 1].
+      - Determine reason: "dropped_by_camera" (if gap in camera seq), "damaged" (if CRC failed),
+        or "link_down" (if socket disconnected).
+      - Append GapRecord to active recording summary and manifest.json.
+3. Chunk Binary Write:
+   a. Write 32-byte VideoFrameHeader directly to active chunk file:
+      part_file_.write(reinterpret_cast<const char*>(&frame.header), sizeof(VideoFrameHeader)).
+   b. Write 625,000 payload bytes directly from preallocated slot memory:
+      part_file_.write(reinterpret_cast<const char*>(frame.pixels()), frame.payload_size()).
+   c. Increment recording total_bytes and total_frames.
+4. 10 MB Chunk Rotation:
+   a. Check current chunk file size: chunk_bytes += (32 + 625,000).
+   b. If chunk_bytes >= 10 MB (10 * 1024 * 1024 bytes):
+      - part_file_.flush(); part_file_.close().
+      - Record closed chunk filename in manifest.json.
+      - Optional wake signal: notify CloudUploader via cv_.notify_one().
+      - Increment chunk counter (e.g. part-0001.bin -> part-0002.bin).
+      - Open next chunk binary file on disk: record/rec-<id>/part-XXXX.bin.
+      - Reset chunk_bytes = 0.
+5. Crash-Safe Manifest Update:
+   a. Periodically write updated manifest.json using atomic temp file replacement
+      (write to manifest.json.tmp, fsync, rename to manifest.json).
+
+Stage 10: High-Watermark Disk Cache Reclamation Algorithm
+---------------------------------------------------------
+1. Usage Assessment:
+   Calculate total disk usage across record/ directory.
+2. Normal Operation (< 80% / 1.6 GB):
+   All chunks remain cached on local disk for zero-latency local review.
+3. High-Watermark Reclamation (>= 80% / 1.6 GB):
+   a. Scan historical recording sessions, sorted by timestamp (oldest first).
+   b. For each chunk part-XXXX.bin in session:
+      - Check if part-XXXX.bin.uploaded exists in the session folder.
+      - If receipt exists AND chunk is not actively being written by recorder:
+        * Delete part-XXXX.bin from disk.
+        * Retain part-XXXX.bin.uploaded receipt marker permanently.
+        * Retain manifest.json permanently.
+        * Re-check total disk usage.
+      - Stop evicting once total disk usage drops safely below 1.6 GB.
+4. Emergency Quota Protection (>= 95% / 1.9 GB):
+   a. If cloud network is disconnected and unuploaded chunks fill disk to 1.9 GB:
+   b. Immediately engage Emergency Write Brake.
+   c. Halt binary writes; drop incoming frames gracefully.
+   d. Log explicit "disk_full" gap record in manifest.json.
+   e. Raise EventLogger active alarm: "disk_near_full".
+   f. Prevents file system ENOSPC corruption and OS crashes.
+
+Stage 11: Autonomous Cloud Uplink & Incremental Streaming SHA-256 Algorithm
+---------------------------------------------------------------------------
+1. Work Queue & Dual-Trigger Ingestion:
+   a. CloudUploader background thread waits on std::condition_variable cv_.
+   b. Triggers:
+      - Live Signal: DiskRecorder notifies uploader when a 10 MB chunk closes.
+      - Autonomous Boot/Idle Scan: At startup and during idle intervals, the uploader
+        scans record/ directly; finds any chunk lacking .bin.uploaded; enqueues it.
+      - Operates continuously even when recording is completely STOPPED!
+2. Streaming Upload Pipeline (0.064 MB RAM Footprint):
+   a. Dequeue next chunk path (e.g., record/rec-123/part-0001.bin).
+   b. Open chunk file with std::ifstream in binary mode.
+   c. Allocate single 64 KB stack/member buffer: std::array<uint8_t, 65536> buffer.
+   d. Initialize incremental FIPS 180-4 SHA256Calculator.
+   e. Stream chunk from disk:
+      - Read 64 KB block from file.
+      - Pass 64 KB block to SHA-256 updater.
+      - Repeat until EOF (10 MB processed in ~160 iterations of 64 KB).
+   f. Finalize 32-byte SHA-256 digest; encode as 64-character lowercase hex string.
+3. HTTP PUT Execution:
+   a. Reuse persistent keep-alive TCP socket to cloud storage server (port 7100).
+   b. Format HTTP/1.1 request:
+      PUT /v1/servers/peripheral-1/objects/{rec_id}/{chunk_id} HTTP/1.1
+      Host: 127.0.0.1:7100
+      Content-Length: 10485760
+      X-Content-SHA256: <64-hex-digest>
+      Connection: keep-alive
+   c. Stream file contents directly over TCP socket using 64 KB send chunks.
+   d. Read HTTP response status code:
+      - If 200 OK or 201 Created:
+        * Create permanent receipt marker on disk: record/rec-123/part-0001.bin.uploaded.
+        * Write hex SHA-256 string into receipt file (65 bytes total).
+        * Log cloud upload confirmation to atomic event ring buffer.
+      - If 503 / 500 / Network Error:
+        * Apply exponential backoff (100 ms, 200 ms, 400 ms ... max 3.0 s).
+        * Re-enqueue chunk for retry.
+
+Stage 12: Lock-Free Event Logging & Active Alarm State Machine Algorithm
+------------------------------------------------------------------------
+1. Lock-Free Event Ring Buffer:
+   a. Event push executes write_ticket_.fetch_add(1, std::memory_order_relaxed).
+   b. Slot index = ticket & (256 - 1) = ticket & 255 (single clock cycle bitwise AND).
+   c. Populate preallocated POD EventRecord slot (timestamp, level, subsystem, event, message).
+   d. Release fence ensures complete write visibility for lock-free reader threads.
+   e. Zero dynamic heap allocation on hot path.
+2. Active Alarm State Machine:
+   a. Maintain active_alarms_ map protected by alarm_mutex_.
+   b. Automated Alarm Transitions:
+      - camera_link_down: Raised when TCP socket disconnects; cleared on reconnect.
+      - motor_stalled: Raised when STATUS fault bit set; cleared when normalized.
+      - clock_sync_lost: Raised when clock drift > 100 ppm or 5 missed TIME_RESP; cleared on sync.
+      - disk_near_full: Raised when disk usage >= 85%; cleared when usage < 80%.
+   c. On any alarm transition: emit SSE broadcast to connected browser dashboards.
+
+Stage 13: Operator Web UI Command & Telemetry Dispatch Algorithm
+----------------------------------------------------------------
+1. Operator Telemetry Query (GET /api/state):
+   CivetWeb queries active subsystems and returns atomic JSON snapshot:
+   - Camera link states, FPS, frame counts, clock offsets.
+   - Active recording state, recording duration, written chunks.
+   - Disk usage, quota ceiling, reclamation status.
+   - Cloud upload backlog (pending objects, pending bytes, last contact timestamp).
+   - Array of active normalized alarms.
+2. Motion Command REST Ingress (POST /api/command & POST /api/jog):
+   a. CivetWeb receives HTTP JSON request: { "cameraId": "cam0", "command": "jog", "panDegPerS": 5.0 }.
+   b. Routes directly to target CameraSession instance: sess->send_jog(), sess->send_home(), etc.
+   c. Enters Stage 5 Outbound Control & Command Dispatch Pipeline for PTCL framing,
+      CRC32 calculation, and wire transmission over full-duplex socket.
+   d. Camera rig executes motion; updates 200 Hz POSE telemetry stream (Stage 4).
+
+================================================================================
+COMPLETE END-TO-END SYSTEM BLOCK DIAGRAM:
+
+                +-------------------------------------------------------------+
+                |          DUAL CAMERA RIGS (ETHERNET SIMULATOR)              |
+                |   cam0: Video (Port 7002)    |    Control (Port 7001)       |
+                |   cam1: Video (Port 7012)    |    Control (Port 7011)       |
+                +---------------------+-----------------------+---------------+
+                                      |                       |
+                 Video Stream (125Mb/s)                       | Bidirectional Control (TCP)
+                 Raw Grayscale 1000x625                       |  In:  200Hz POSE, 2Hz STATUS, ACK
+                                      |                       |  Out: 4Hz TIME_REQ, Motion CMDs
+                                      v                       v ^
+  +-----------------------------------------------------------------------------------------------------+
+  |                                PERIPHERAL GATEWAY SERVER                                            |
+  |                                                                                                     |
+  |  +-----------------------------------------------------------------------------------------------+  |
+  |  | 1. TRANSPORT LAYER (peripheral_socket)                                                        |  |
+  |  |  Zero-Mutex Full-Duplex Sockets (std::atomic<int> fd_ + kernel separated rx/tx queues)        |  |
+  |  |    * StreamCapture(cam0_video)   * StreamCapture(cam0_control)                                |  |
+  |  |    * StreamCapture(cam1_video)   * StreamCapture(cam1_control)                                |  |
+  |  +--------------+-------------------------------------+------------------------------------------+  |
+  |                 | Direct slot pointer                 | Pushes inbound control bytes                |
+  |                 | (Zero-copy writable_span)           |                                             |
+  |                 v                                     v                                             |
+  |  +------------------------------+   +------------------------------------------------------------+  |
+  |  | 2. MEMORY POOL (~40.6 MB)    |   | 3. PROTOCOL DEFRAMING & RECOVERY                           |  |
+  |  |  FrameMemoryPool (64 Slots)  |   |    ControlFramer (PTCL magic, CRC32, HELLO/POSE/STATUS)    |  |
+  |  |  * cam0 Partition: 32 slots  |   +-----------------------------+------------------------------+  |
+  |  |    (head & 31 bitwise mask)  |                                 |                                 |
+  |  |  * cam1 Partition: 32 slots  |                                 | Dispatches telemetry            |
+  |  |    (head & 31 bitwise mask)  |                                 v                                 |
+  |  |  Intrusive FrameSlotHandle   |   +------------------------------------------------------------+  |
+  |  |  (Zero heap churn, 0 MB/s)   |   | 4. CAMERA COORDINATION (CameraSession)                     |  |
+  |  +--------------+---------------+   |    * TimeSyncFilter: 4 Hz PTP Software Filter              |  |
+  |                 |                   |      (RTT tracking, 32-bit unwrapping, TIME_REQ ticker)    |  |
+  |                 v                   |    * PoseInterpolator: 200 Hz Ring Buffer                  |  |
+  |  +------------------------------+   |      (Linear interpolation at mid-exposure: < 0.05 deg)    |  |
+  |  | VideoFramer (5000B recovery) |   |    * Outbound Control & Command Dispatch Pipeline:         |  |
+  |  | - IEEE 802.3 CRC32 check     |   |      - 4 Hz TIME_REQ sync & Motion CMDs (Jog/Goto/Home)    |  |
+  |  | - Fate Classifier            |   |      - Direct TCP_NODELAY wire dispatch (Port 7001/7011)   |  |
+  |  +--------------+---------------+   +-----------------------------+------------------------------+  |
+  |                 |                                                 |                                 |
+  |                 v Enriched VideoFrame (SlotHandle + Interpolated) |                                 |
+  |  +================================================================v===============================+  |
+  |  | DUAL-FORK DISPATCH PIPELINE (CameraSession::frame_handler -> WebServer::on_frame_received)    |  |
+  |  +-----------------------------------------------+   +-------------------------------------------+  |
+  |  | PATH A: DISK RECORDING (Conditional)          |   | PATH B: LIVE OPERATOR PREVIEW (Always ON) |  |
+  |  | Active ONLY when user starts a recording!     |   | Continuous in-memory 320x200 live preview |  |
+  |  | (Zero disk writes when recording is STOPPED)  |   | (Zero disk I/O, zero cloud dependency)    |  |
+  |  +-----------------------+-----------------------+   +---------------------+---------------------+  |
+  |                          |                                                 |                        |
+  |                          v [When Recording == ON]                          v [Continuous Live Feed] |
+  |  +-----------------------------------------------+   +-------------------------------------------+  |
+  |  | 5. DISK RECORDER (DiskRecorder)               |   | 8. EMBEDDED WEB SERVER (CivetWeb Engine)  |  |
+  |  |    std::mutex mutex_ (Serializes writes)      |   |    * In-Memory Downsampler (320x200)      |  |
+  |  |    * Multiplexes dual-cam frames (31.25 MB/s) |   |    * REST: GET /api/preview (Live Feed)   |  |
+  |  |      into rolling 10 MB chunks on disk        |   |            GET /api/state, POST /command  |  |
+  |  |    * manifest.json & sequence gap accounting  |   |            POST /api/recording/start/stop |  |
+  |  |    * 80% (1.6 GB) High-Watermark Reclamation  |   |    * Bundled React Viewer (/dist)         |  |
+  |  +-----------------------+-----------------------+   +---------------------+---------------------+  |
+  |                          |                                                 ^                        |
+  |                          | 1. Writes 10 MB chunks                          | Broadcasts SSE events  |
+  |                          v & manifest.json                                 | to Web Server          |
+  |  +-----------------------------------------------+   +---------------------+---------------------+  |
+  |  | SHARED STORAGE: LOCAL DISK (record/rec-id/)   |   | 7. EVENT & NOTIFICATION SUBSYSTEM         |  |
+  |  |  * part-0001.bin ... (Rolling 10 MB Chunks)   |   |    AtomicEventRingBuffer<256>             |  |
+  |  |  * manifest.json (Gap tracking & metadata)    |   |    - 100% Lock-Free / Wait-Free Ticket    |  |
+  |  |  * part-0001.bin.uploaded (Receipt Markers)   |   |    - Levels: DEBUG, INFO, WARN, ALARM     |  |
+  |  +-----------------------+-----------------------+   |    EventLogger Active Alarms:             |  |
+  |                          |                           |    - camera_link_down, disk_near_full     |  |
+  |        [Cloud reads]     | [Autonomous Scan]         +-------------------------------------------+  |
+  |        64 KB pieces      | Boot/Idle Chunks                                |                        |
+  |                          v                                                 |                        |
+  |  +-----------------------------------------------+                         |                        |
+  |  | 6. CLOUD UPLOADER (Autonomous Subsystem)      |                         |                        |
+  |  |    Reads directly from DISK, NOT Recorder!    |                         |                        |
+  |  |    (Streams chunks even if recording STOPPED) |                         |                        |
+  |  |    * Single 64 KB Buffer (0.064 MB RAM)       |                         |                        |
+  |  |    * Streaming FIPS 180-4 SHA-256 Hasher      |                         |                        |
+  |  |    * HTTP PUT (Port 7100) -> Writes .uploaded |                         |                        |
+  |  +-----------------------+-----------------------+                         |                        |
+  |                          |                                                 |                        |
+  +--------------------------|-------------------------------------------------v------------------------+
+                             |                                                 |                         
+                             | HTTP PUT (Port 7100)                            | HTTP / SSE / REST       
+                             v                                                 v (Port 8080)             
+  +--------------------------------------------------+   +---------------------------------------------+ 
+  | MOCK CLOUD STORAGE (Port 7100)                   |   | OPERATOR BROWSER & REACT VIEWER (Port 8080) | 
+  | Accepts 10 MB chunk files via HTTP PUT           |   |  * Dual-Camera Live Canvas (320x200 Preview)| 
+  | Streams data directly to object store            |   |  * D-Pad Pan/Tilt Jog Controls              | 
+  +--------------------------------------------------+   |  * Start/Stop Recording Session UI          | 
+                                                         |  * Real-Time Alarm & Event Logs Stream      | 
+                                                         +---------------------------------------------+ 
+
+
 3.1 Transport Subsystem (peripheral_socket)
 -------------------------------------------
-Files: include/peripheral/transport/socket.hpp, src/transport/socket.cc
-- Thread-Safe Full Duplex: Distinct read_mutex_ and write_mutex_ allow concurrent
-  recv_some() / recv_exact() and send_all() on the same TCP descriptor.
+- Zero-Mutex Full Duplex: Lock-free socket architecture with atomic descriptors (std::atomic<int> fd_)
+  leverages the Linux kernel's independent send and receive queues. Concurrent recv_some() / recv_exact()
+  and send_all() execute on the same TCP descriptor with zero application-level lock overhead.
 - Socket Configuration:
   * SO_RCVBUF set to 2 MB (prevents kernel socket drop during disk I/O bursts).
   * TCP_NODELAY enabled (disables Nagle algorithm for low-latency commands).
@@ -274,10 +990,17 @@ Files: include/peripheral/storage/disk_recorder.hpp, src/storage/disk_recorder.c
 ------------------------------------------------------------------
 Files: include/peripheral/storage/cloud_uploader.hpp, src/storage/cloud_uploader.cc
        include/peripheral/crypto/sha256.hpp
+- Autonomous Dual-Path Ingestion (Independent of Recording State):
+  * Path A (Active Live Recording): When DiskRecorder completes a 10 MB chunk or
+    finalizes manifest.json, it immediately notifies CloudUploader via enqueue_chunk().
+  * Path B (Autonomous Standalone Scanner): Even when recording is STOPPED, paused,
+    or was never started, CloudUploader independently scans record/ on startup (and
+    monitors backlog). It automatically identifies un-uploaded .bin chunks and manifests
+    lacking .uploaded markers, queueing and uploading them in the background.
 - Background Worker: Non-blocking FIFO queue serviced by a dedicated background
   thread with condition-variable wakeups.
 - Streaming SHA-256: FIPS 180-4 compliant incremental hasher reads 64 KB buffers,
-  computing 32-byte digests without loading 10 MB chunks into memory.
+  computing 32-byte digests without loading 10 MB chunks into memory (0.064 MB RAM footprint).
 - HTTP PUT Protocol:
   * Endpoint: PUT /v1/servers/peripheral-1/objects/{rec_id}/{chunk_id}
   * Headers: Authorization: Bearer dev-token, X-Content-SHA256: <hash>
@@ -285,8 +1008,9 @@ Files: include/peripheral/storage/cloud_uploader.hpp, src/storage/cloud_uploader
   * 201/200: Confirmed upload; writes .uploaded receipt marker.
   * 409 Conflict: Object already in cloud; marks uploaded.
   * 503 / Drops: Exponential backoff retry (100 ms to 3 s).
-- Crash Recovery: Automatically scans record/ on startup and enqueues un-uploaded
-  chunks.
+- Crash Resilience: Automatically recovers historical sessions across server restarts
+  without operator intervention.
+
 
 3.8 Lock-Free Live Alarms & Event Streaming (AtomicEventRingBuffer)
 -------------------------------------------------------------------

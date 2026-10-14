@@ -1,7 +1,10 @@
 #include "peripheral/memory/frame_pool.hpp"
 
 #include <algorithm>
+#include <fstream>
 #include <iostream>
+#include <stdexcept>
+#include <unistd.h>
 
 namespace peripheral {
 
@@ -73,18 +76,93 @@ size_t FramePoolPartition::in_use_slots() const noexcept {
     return slot_count_ - free_list_.size();
 }
 
+
+uint64_t FrameMemoryPool::detect_system_memory_bytes() {
+    // 1. Check cgroup v2 memory limit (standard in modern Docker container)
+    std::ifstream cgroup_v2("/sys/fs/cgroup/memory.max");
+    if (cgroup_v2.is_open()) {
+        std::string val;
+        if (cgroup_v2 >> val && val != "max") {
+            try {
+                uint64_t bytes = std::stoull(val);
+                if (bytes > 0 && bytes < 1000ULL * 1024 * 1024 * 1024) {
+                    return bytes;
+                }
+            } catch (...) {}
+        }
+    }
+
+    // 2. Check cgroup v1 memory limit
+    std::ifstream cgroup_v1("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+    if (cgroup_v1.is_open()) {
+        uint64_t bytes = 0;
+        if (cgroup_v1 >> bytes && bytes > 0 && bytes < 1000ULL * 1024 * 1024 * 1024) {
+            return bytes;
+        }
+    }
+
+    // 3. Fallback to OS physical memory
+#if defined(_SC_PHYS_PAGES) && defined(_SC_PAGE_SIZE)
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long page_size = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && page_size > 0) {
+        return static_cast<uint64_t>(pages) * static_cast<uint64_t>(page_size);
+    }
+#endif
+
+    // 4. Default to assignment standard 250 MB ceiling
+    return 250ULL * 1024 * 1024;
+}
+
+uint64_t FrameMemoryPool::safe_max_pool_memory_bytes(uint64_t sys_mem_bytes) {
+    // Under 250 MB total RAM, the Linux kernel page cache needs 100-150 MB for dirty writeback
+    // buffers during 31.25 MB/s disk recording. Sockets, web server, and application binary
+    // need ~20-30 MB.
+    // Safe pool ceiling = max 40% of detected memory, capped at 100 MB for the 250 MB environment.
+    uint64_t forty_percent = static_cast<uint64_t>(sys_mem_bytes * 0.40);
+    constexpr uint64_t HARD_TARGET_POOL_CEILING = 100ULL * 1024 * 1024; // 100 MB
+    return std::min(forty_percent, HARD_TARGET_POOL_CEILING);
+}
+
 FrameMemoryPool::FrameMemoryPool(Config config)
     : config_(config) {
     if (config_.endpoint_count == 0) {
         config_.endpoint_count = 1;
+    }
+    if (config_.slots_per_endpoint == 0) {
+        config_.slots_per_endpoint = 32;
+    }
+    // Auto-compute total slots from endpoints * slots_per_endpoint if total_slots is 0
+    if (config_.total_slots == 0) {
+        config_.total_slots = config_.endpoint_count * config_.slots_per_endpoint;
     }
     if (config_.total_slots < config_.endpoint_count) {
         config_.total_slots = config_.endpoint_count * 2;
     }
     slots_per_endpoint_ = config_.total_slots / config_.endpoint_count;
 
-    // Allocate contiguous physical slab pool once at startup
+    // Calculate total required slab memory
     size_t total_bytes = config_.total_slots * config_.slot_size;
+
+    // Determine safe memory ceiling protecting OS kernel writeback page cache and system headroom
+    safe_memory_ceiling_ = config_.max_pool_memory_bytes;
+    if (safe_memory_ceiling_ == 0) {
+        uint64_t sys_mem = detect_system_memory_bytes();
+        safe_memory_ceiling_ = safe_max_pool_memory_bytes(sys_mem);
+    }
+
+    if (total_bytes > safe_memory_ceiling_) {
+        double total_mb = static_cast<double>(total_bytes) / (1024.0 * 1024.0);
+        double limit_mb = static_cast<double>(safe_memory_ceiling_) / (1024.0 * 1024.0);
+        throw std::invalid_argument(
+            "FrameMemoryPool memory requirement (" + std::to_string(total_mb) + " MB for " +
+            std::to_string(config_.endpoint_count) + " cameras @ " +
+            std::to_string(slots_per_endpoint_) + " slots/cam) exceeds safe ingress threshold (" +
+            std::to_string(limit_mb) + " MB). Kernel page cache and I/O buffer headroom would be exhausted under the 250 MB ceiling."
+        );
+    }
+
+    // Allocate contiguous physical slab pool once at startup
     storage_.resize(total_bytes);
 
     uint8_t* base_ptr = storage_.data();
