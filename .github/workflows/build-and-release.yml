@@ -126,8 +126,8 @@ jobs:
           path: peripheral-macos-arm64.tar.gz
           retention-days: 30
 
-  docker-verification:
-    name: Docker Container Build & Validation
+  docker-build:
+    name: Docker Container Image & Validation
     runs-on: ubuntu-24.04
 
     steps:
@@ -136,8 +136,19 @@ jobs:
 
       - name: Build Docker Container
         run: |
-          docker build -t peripheral-gateway .
+          docker build -t peripheral-gateway:latest .
 
       - name: Run Containerized Smoke Test
         run: |
-          docker run --rm peripheral-gateway --timeout-ms 2000
+          docker run --rm peripheral-gateway:latest --timeout-ms 2000
+
+      - name: Save Docker Image to Compressed Tarball
+        run: |
+          docker save peripheral-gateway:latest | gzip > peripheral-gateway-docker.tar.gz
+
+      - name: Upload Docker Image Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: peripheral-gateway-docker-image
+          path: peripheral-gateway-docker.tar.gz
+          retention-days: 30

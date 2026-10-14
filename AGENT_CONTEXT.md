@@ -145,5 +145,5 @@ If running components individually in separate terminals:
 - Triggers automatically on push/PR to `master` and `main`, or manually via GitHub's "Run workflow" button (`workflow_dispatch`).
 - **Linux Job**: Runs on `ubuntu-24.04` with GCC 14 (C++26), compiles binary, executes all 9 unit tests, builds React viewer bundle, and uploads `peripheral-linux-x86_64.tar.gz`.
 - **macOS Job**: Runs on `macos-14` (Apple Silicon), compiles binary, runs tests, and uploads `peripheral-macos-arm64.tar.gz`.
-- **Docker Job**: Builds and verifies the container image with automated smoke tests.
+- **Docker Job**: Builds container image with automated smoke tests, saves it to `peripheral-gateway-docker.tar.gz`, and uploads `peripheral-gateway-docker-image`.
 - Downloadable artifacts are preserved under the Actions run tab for 30 days.
