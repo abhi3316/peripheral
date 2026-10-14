@@ -1,12 +1,13 @@
 #pragma once
 
-#include "camera_endpoint.hpp"
-#include "control_framer.hpp"
-#include "protocol.hpp"
-#include "socket.hpp"
-#include "stream_capture.hpp"
-#include "video_frame.hpp"
-#include "video_framer.hpp"
+#include "peripheral/camera/camera_endpoint.hpp"
+#include "peripheral/memory/frame_pool.hpp"
+#include "peripheral/protocol/control_framer.hpp"
+#include "peripheral/protocol/protocol.hpp"
+#include "peripheral/protocol/video_frame.hpp"
+#include "peripheral/protocol/video_framer.hpp"
+#include "peripheral/transport/socket.hpp"
+#include "peripheral/transport/stream_capture.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -45,17 +46,22 @@ using HelloHandler = std::function<void(const HelloPayload& hello)>;
  *
  * Coordinates:
  *  - Ingress Video Framer (VFRM parsing, CRC checks, garbage recovery)
+ *  - Direct zero-copy streaming into preallocated FramePoolPartition slots
  *  - Ingress Control Framer (PTCL parsing, POSE, STATUS, HELLO)
  *  - Outgoing command generation (TIME_REQ, CMD jog/home)
  *  - Session-level mutex thread synchronization
  */
 class CameraSession {
 public:
-    explicit CameraSession(CameraEndpoint endpoint, CameraSessionConfig config = CameraSessionConfig::default_config());
+    explicit CameraSession(CameraEndpoint endpoint,
+                           CameraSessionConfig config = CameraSessionConfig::default_config(),
+                           FramePoolPartition* pool_partition = nullptr);
     ~CameraSession();
 
     CameraSession(const CameraSession&) = delete;
     CameraSession& operator=(const CameraSession&) = delete;
+
+    void set_pool_partition(FramePoolPartition* pool);
 
     // Start background receiver & framer threads
     bool start();
@@ -94,6 +100,7 @@ public:
 private:
     CameraEndpoint endpoint_;
     CameraSessionConfig config_;
+    FramePoolPartition* pool_partition_{nullptr};
 
     mutable std::mutex session_mutex_;
 

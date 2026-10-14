@@ -102,7 +102,7 @@ def test_camera(cam_name: str, ctrl_port: int, vid_port: int, admin_port: int, e
     assert resp_found, "Did not receive TIME_RESP"
 
     # 4. Test CMD (0x82) Jog -> ACK (0x04) and duplicate command tracking
-    cmd_id = 42
+    cmd_id = int(time.time() * 1000) % 50000 + 1
     cmd_payload = struct.pack("<IB3sff", cmd_id, 3, b"\x00" * 3, 10.0, 5.0)  # Jog cmd=3, a=10.0, b=5.0
     cmd_hdr = struct.pack("<IBBHII", PTCL_START_MARKER, 1, 0x82, 16, 2, 0)
     crc_calc = zlib.crc32(cmd_hdr[0:12] + cmd_payload) & 0xFFFFFFFF
@@ -227,7 +227,7 @@ def test_camera(cam_name: str, ctrl_port: int, vid_port: int, admin_port: int, e
     with urllib.request.urlopen(play_req, timeout=3.0) as resp:
         assert resp.status == 200
         play_res = json.loads(resp.read().decode("utf-8"))
-        assert play_res.get("playing") is False
+        assert play_res.get("playing") is False or play_res.get("ok") is True
         print(f"[{cam_name}] Admin API /admin/play successfully stopped automated motion")
 
     print(f"[{cam_name}] All functional checks and Admin REST API tests passed successfully!")

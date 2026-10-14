@@ -1,7 +1,4 @@
-#include "peripheral/control_framer.hpp"
-#include "peripheral/crc32.hpp"
-#include "peripheral/protocol.hpp"
-#include "peripheral/video_framer.hpp"
+#include "peripheral/peripheral.hpp"
 
 #include <cassert>
 #include <cstring>

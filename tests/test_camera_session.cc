@@ -1,4 +1,4 @@
-#include "peripheral/camera_session.hpp"
+#include "peripheral/camera/camera_session.hpp"
 
 #include <cassert>
 #include <chrono>

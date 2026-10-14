@@ -1,8 +1,8 @@
 #pragma once
 
-#include "camera_endpoint.hpp"
-#include "socket.hpp"
-#include "socket_types.hpp"
+#include "peripheral/camera/camera_endpoint.hpp"
+#include "peripheral/transport/socket.hpp"
+#include "peripheral/transport/socket_types.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -15,19 +15,25 @@
 
 namespace peripheral {
 
+using WritableSpanProvider = std::function<std::span<uint8_t>(size_t min_bytes)>;
+using CommitWriteCallback = std::function<void(size_t bytes_written)>;
+using DataCallback = std::function<void(std::string_view stream_name, std::span<const uint8_t> data)>;
+using StateCallback = std::function<void(std::string_view stream_name, SocketState state)>;
+
 struct StreamCaptureConfig {
     SocketConfig socket_config{};
     std::chrono::milliseconds reconnect_delay{500};
     size_t read_buffer_size{64 * 1024}; // 64 KB read chunk size
-};
 
-using DataCallback = std::function<void(std::string_view stream_name, std::span<const uint8_t> data)>;
-using StateCallback = std::function<void(std::string_view stream_name, SocketState state)>;
+    // Direct zero-copy ingress hooks:
+    WritableSpanProvider writable_span_provider{nullptr};
+    CommitWriteCallback on_commit_write{nullptr};
+};
 
 /**
  * @brief Manages a background capture thread for a TCP stream (e.g. video or control).
  *        Handles auto-connection, automatic reconnection on network cuts/camera reboots,
- *        and thread-safe data dispatch to registered callbacks.
+ *        and thread-safe zero-copy data dispatch to preallocated slot spans.
  */
 class StreamCapture {
 public:
@@ -75,15 +81,6 @@ private:
 
 /**
  * @brief Extensible API to start capturing any stream from a TCP port.
- *        Can be called for cam0, cam1, or any future cameras (camN) and endpoints.
- *
- * @param name Unique identifier for this stream (e.g. "cam0_video", "cam1_ctrl").
- * @param host Remote hostname or IP address (e.g. "127.0.0.1").
- * @param port TCP port to connect and stream from.
- * @param config Socket and buffer tuning options.
- * @param on_data Callback invoked when raw data chunks are received.
- * @param on_state Optional callback notifying of connection transitions.
- * @return std::unique_ptr<StreamCapture> Active stream capture handle.
  */
 std::unique_ptr<StreamCapture> capture_stream(
     std::string_view name,

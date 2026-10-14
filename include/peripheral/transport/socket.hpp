@@ -1,6 +1,6 @@
 #pragma once
 
-#include "socket_types.hpp"
+#include "peripheral/transport/socket_types.hpp"
 
 #include <atomic>
 #include <chrono>

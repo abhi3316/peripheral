@@ -1,4 +1,4 @@
-#include "peripheral/stream_capture.hpp"
+#include "peripheral/transport/stream_capture.hpp"
 
 #include <cassert>
 #include <chrono>

@@ -1,4 +1,4 @@
-#include "peripheral/control_framer.hpp"
+#include "peripheral/protocol/control_framer.hpp"
 
 #include <cstring>
 

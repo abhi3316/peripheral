@@ -1,8 +1,8 @@
 #pragma once
 
-#include "camera_session.hpp"
-#include "protocol.hpp"
-#include "video_frame.hpp"
+#include "peripheral/camera/camera_session.hpp"
+#include "peripheral/protocol/protocol.hpp"
+#include "peripheral/protocol/video_frame.hpp"
 
 #include <atomic>
 #include <cstdint>

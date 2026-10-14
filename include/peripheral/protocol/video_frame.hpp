@@ -1,6 +1,7 @@
 #pragma once
 
-#include "protocol.hpp"
+#include "peripheral/memory/frame_pool.hpp"
+#include "peripheral/protocol/protocol.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -11,10 +12,12 @@ namespace peripheral {
 
 /**
  * @brief High-level domain representation of a captured video frame.
+ *        Backed zero-copy by a preallocated FrameSlot from the FrameMemoryPool.
  */
 struct VideoFrame {
     VideoFrameHeader header{};
-    std::vector<uint8_t> image{};
+    FrameSlotHandle slot{};             // Non-null when backed by preallocated slab pool
+    std::vector<uint8_t> image{};      // Fallback storage if pool is not attached
     TruthStamp truth_stamp{};
     FrameFate fate{FrameFate::Sent};
     uint64_t rx_monotonic_us{0}; // Server CLOCK_MONOTONIC timestamp in µs
@@ -41,7 +44,14 @@ struct VideoFrame {
     }
 
     [[nodiscard]] std::span<const uint8_t> pixels() const noexcept {
+        if (slot) {
+            return slot->payload();
+        }
         return image;
+    }
+
+    [[nodiscard]] size_t payload_size() const noexcept {
+        return pixels().size();
     }
 };
 

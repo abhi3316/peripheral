@@ -1,8 +1,8 @@
 #pragma once
 
-#include "crc32.hpp"
-#include "protocol.hpp"
-#include "stream_buffer.hpp"
+#include "peripheral/memory/stream_buffer.hpp"
+#include "peripheral/protocol/crc32.hpp"
+#include "peripheral/protocol/protocol.hpp"
 
 #include <cstdint>
 #include <functional>

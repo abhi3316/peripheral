@@ -1,10 +1,12 @@
-#include "peripheral/camera_session.hpp"
+#include "peripheral/camera/camera_session.hpp"
 
 namespace peripheral {
 
-CameraSession::CameraSession(CameraEndpoint endpoint, CameraSessionConfig config)
+CameraSession::CameraSession(CameraEndpoint endpoint, CameraSessionConfig config, FramePoolPartition* pool_partition)
     : endpoint_(std::move(endpoint)),
-      config_(std::move(config)) {
+      config_(std::move(config)),
+      pool_partition_(pool_partition),
+      video_framer_(2 * 1024 * 1024, pool_partition_) {
     // Wire up framer internal callbacks
     video_framer_.set_frame_callback([this](const VideoFrame& frame) {
         if (frame_handler_) {
@@ -35,6 +37,12 @@ CameraSession::~CameraSession() {
     stop();
 }
 
+void CameraSession::set_pool_partition(FramePoolPartition* pool) {
+    std::scoped_lock lock(session_mutex_);
+    pool_partition_ = pool;
+    video_framer_.set_pool_partition(pool);
+}
+
 bool CameraSession::start() {
     std::scoped_lock lock(session_mutex_);
     if (running_.exchange(true)) {
@@ -44,6 +52,17 @@ bool CameraSession::start() {
     // Reset framers for a fresh session
     video_framer_.reset();
     control_framer_.reset();
+
+    // Configure direct zero-copy ingress into preallocated slot
+    config_.video_config.writable_span_provider = [this](size_t min_bytes) {
+        std::scoped_lock lk(session_mutex_);
+        return video_framer_.writable_span(min_bytes);
+    };
+    config_.video_config.on_commit_write = [this](size_t bytes) {
+        std::scoped_lock lk(session_mutex_);
+        video_framer_.commit_write(bytes);
+        video_framer_.parse_available();
+    };
 
     // 1. Spawn video stream receiver
     video_stream_ = capture_stream(

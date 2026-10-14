@@ -1,4 +1,4 @@
-#include "peripheral/stream_capture.hpp"
+#include "peripheral/transport/stream_capture.hpp"
 
 #include <iostream>
 #include <vector>
@@ -72,7 +72,10 @@ SocketStatus StreamCapture::send(std::span<const uint8_t> data) {
 }
 
 void StreamCapture::capture_loop() {
-    std::vector<uint8_t> read_buffer(config_.read_buffer_size);
+    std::vector<uint8_t> fallback_buffer;
+    if (!config_.writable_span_provider) {
+        fallback_buffer.resize(config_.read_buffer_size);
+    }
 
     while (running_.load()) {
         if (!socket_.is_connected()) {
@@ -95,16 +98,30 @@ void StreamCapture::capture_loop() {
             }
         }
 
-        // Read available chunk from socket
         size_t bytes_read = 0;
-        // Use a 200ms slice to ensure responsive thread termination
-        auto status = socket_.recv_some(read_buffer, bytes_read, std::chrono::milliseconds(200));
+        SocketStatus status = SocketStatus::Ok;
 
-        if (status == SocketStatus::Ok) {
-            if (bytes_read > 0 && data_cb_) {
-                data_cb_(name_, std::span<const uint8_t>(read_buffer.data(), bytes_read));
+        if (config_.writable_span_provider && config_.on_commit_write) {
+            // Direct zero-copy ingress: Sockets stream directly into preallocated slot
+            std::span<uint8_t> target = config_.writable_span_provider(config_.read_buffer_size);
+            if (!target.empty()) {
+                status = socket_.recv_some(target, bytes_read, std::chrono::milliseconds(200));
+                if (status == SocketStatus::Ok && bytes_read > 0) {
+                    config_.on_commit_write(bytes_read);
+                }
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-        } else if (status == SocketStatus::Timeout) {
+        } else {
+            status = socket_.recv_some(fallback_buffer, bytes_read, std::chrono::milliseconds(200));
+            if (status == SocketStatus::Ok) {
+                if (bytes_read > 0 && data_cb_) {
+                    data_cb_(name_, std::span<const uint8_t>(fallback_buffer.data(), bytes_read));
+                }
+            }
+        }
+
+        if (status == SocketStatus::Timeout) {
             // Read timeout: healthy keepalive iteration, check running_ flag again
             continue;
         } else if (status == SocketStatus::Closed || status == SocketStatus::Error) {

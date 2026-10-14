@@ -1,4 +1,4 @@
-#include "peripheral/web_server.hpp"
+#include "peripheral/web/web_server.hpp"
 
 #include <arpa/inet.h>
 #include <chrono>
@@ -527,11 +527,11 @@ void WebServer::on_frame_received(std::string_view camera_name, const VideoFrame
     }
 
     // Downsample full image to 320x200
-    prev.downsampled_pixels = downsample_320x200(frame.image, frame.header.width, frame.header.height, 320, 200);
+    prev.downsampled_pixels = downsample_320x200(frame.pixels(), frame.header.width, frame.header.height, 320, 200);
 
     if (is_recording_) {
         recorded_frames_++;
-        recorded_bytes_ += sizeof(VideoFrameHeader) + frame.image.size();
+        recorded_bytes_ += sizeof(VideoFrameHeader) + frame.payload_size();
     }
 }
 

@@ -1,4 +1,4 @@
-#include "peripheral/stream_buffer.hpp"
+#include "peripheral/memory/stream_buffer.hpp"
 
 #include <atomic>
 #include <cassert>

@@ -30,25 +30,14 @@ find_package(Threads REQUIRED)
 # peripheral_socket Library (Modular socket support for camera streams)
 # -----------------------------------------------------------------------------
 add_library(peripheral_socket
-    src/socket.cc
-    src/stream_capture.cc
-    src/stream_buffer.cc
-    src/video_framer.cc
-    src/control_framer.cc
-    src/camera_session.cc
-    src/web_server.cc
-    include/peripheral/socket.hpp
-    include/peripheral/socket_types.hpp
-    include/peripheral/camera_endpoint.hpp
-    include/peripheral/stream_capture.hpp
-    include/peripheral/stream_buffer.hpp
-    include/peripheral/crc32.hpp
-    include/peripheral/protocol.hpp
-    include/peripheral/video_frame.hpp
-    include/peripheral/video_framer.hpp
-    include/peripheral/control_framer.hpp
-    include/peripheral/camera_session.hpp
-    include/peripheral/web_server.hpp
+    src/transport/socket.cc
+    src/transport/stream_capture.cc
+    src/memory/stream_buffer.cc
+    src/memory/frame_pool.cc
+    src/protocol/video_framer.cc
+    src/protocol/control_framer.cc
+    src/camera/camera_session.cc
+    src/web/web_server.cc
 )
 
 target_include_directories(peripheral_socket PUBLIC
@@ -125,6 +114,16 @@ target_link_libraries(test_framers PRIVATE
 )
 
 add_test(NAME FramersTest COMMAND test_framers)
+
+add_executable(test_frame_pool
+    tests/test_frame_pool.cc
+)
+
+target_link_libraries(test_frame_pool PRIVATE
+    peripheral_socket
+)
+
+add_test(NAME FramePoolTest COMMAND test_frame_pool)
 
 # Python Functional Test with Virtual Camera Simulator
 find_package(Python3 COMPONENTS Interpreter)
