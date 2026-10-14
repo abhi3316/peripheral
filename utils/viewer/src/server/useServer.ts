@@ -33,7 +33,7 @@ function useYourServer(enabled: boolean): ServerLink {
   const [state, setState] = useState<ServerState | null>(null);
   const [stateAtMs, setStateAtMs] = useState<number | null>(null);
   const [preview, setPreview] = useState<{ image: Preview; receivedAtMs: number } | null>(null);
-  const [events] = useState<ServerEvent[]>([]);
+  const [events, setEvents] = useState<ServerEvent[]>([]);
   const [problem, setProblem] = useState<string | null>(null);
 
   const watchingCameraRef = useRef<string | null>('cam0');
@@ -71,6 +71,9 @@ function useYourServer(enabled: boolean): ServerLink {
           setState(data);
           setStateAtMs(performance.now());
           setProblem(null);
+          if (Array.isArray((data as any).events)) {
+            setEvents((data as any).events);
+          }
         }
       } catch (err) {
         if (!cancelled) {

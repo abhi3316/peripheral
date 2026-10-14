@@ -1,5 +1,6 @@
 #include "peripheral/web/web_server.hpp"
 #include "peripheral/storage/cloud_uploader.hpp"
+#include "peripheral/events/event_logger.hpp"
 
 #include <arpa/inet.h>
 #include <chrono>
@@ -219,6 +220,7 @@ inline std::string get_embedded_viewer_html() {
     <span id="recBadge" class="badge badge-rec" style="display:none;">REC</span>
   </div>
   <div class="btn-group">
+    <a href="/events" target="_blank" style="text-decoration:none;"><button style="background:rgba(59,130,246,0.15); border-color:#3b82f6; color:#60a5fa;">⚡ Live Events & Alarms</button></a>
     <button id="btnRec" onclick="toggleRecording()">Start Recording</button>
   </div>
 </header>
@@ -625,6 +627,66 @@ void WebServer::handle_client(int client_fd) {
         return;
     }
 
+    if (path.starts_with("/api/events")) {
+        std::string min_lvl = "debug";
+        uint64_t since_id = 0;
+        size_t limit = 100;
+
+        auto qpos = path.find('?');
+        if (qpos != std::string::npos) {
+            std::string qs = path.substr(qpos + 1);
+            auto p1 = qs.find("min_level=");
+            if (p1 == std::string::npos) p1 = qs.find("level=");
+            if (p1 != std::string::npos) {
+                auto start = qs.find('=', p1) + 1;
+                auto end = qs.find('&', start);
+                min_lvl = (end == std::string::npos) ? qs.substr(start) : qs.substr(start, end - start);
+            }
+            auto p2 = qs.find("since_id=");
+            if (p2 != std::string::npos) {
+                auto start = qs.find('=', p2) + 1;
+                auto end = qs.find('&', start);
+                std::string sid = (end == std::string::npos) ? qs.substr(start) : qs.substr(start, end - start);
+                try { since_id = std::stoull(sid); } catch (...) {}
+            }
+            auto p3 = qs.find("limit=");
+            if (p3 != std::string::npos) {
+                auto start = qs.find('=', p3) + 1;
+                auto end = qs.find('&', start);
+                std::string lim = (end == std::string::npos) ? qs.substr(start) : qs.substr(start, end - start);
+                try { limit = std::stoul(lim); } catch (...) {}
+            }
+        }
+
+        std::string body = generate_events_json(min_lvl, since_id, limit);
+        std::ostringstream oss;
+        oss << "HTTP/1.1 200 OK\r\n"
+            << "Content-Type: application/json\r\n"
+            << "Access-Control-Allow-Origin: *\r\n"
+            << "Content-Length: " << body.size() << "\r\n"
+            << "\r\n"
+            << body;
+        std::string s = oss.str();
+        ::send(client_fd, s.data(), s.size(), 0);
+        ::close(client_fd);
+        return;
+    }
+
+    if (path == "/events" || path == "/events.html" || path == "/logs" || path == "/logs.html") {
+        std::string body = get_events_page_html();
+        std::ostringstream oss;
+        oss << "HTTP/1.1 200 OK\r\n"
+            << "Content-Type: text/html; charset=utf-8\r\n"
+            << "Access-Control-Allow-Origin: *\r\n"
+            << "Content-Length: " << body.size() << "\r\n"
+            << "\r\n"
+            << body;
+        std::string s = oss.str();
+        ::send(client_fd, s.data(), s.size(), 0);
+        ::close(client_fd);
+        return;
+    }
+
     if (path.starts_with("/api/preview")) {
         std::string cam = "cam0";
         auto pos = path.find("camera=");
@@ -977,7 +1039,11 @@ std::string WebServer::generate_state_json() {
         oss << "  \"recording\": null,\n";
     }
 
-    oss << "  \"alarms\": []\n"
+    std::string alarms_json = logger_ ? logger_->to_alarms_json() : "[]";
+    std::string events_json = logger_ ? logger_->to_events_json(logger_->get_recent_events(50)) : "[]";
+
+    oss << "  \"alarms\": " << alarms_json << ",\n"
+        << "  \"events\": " << events_json << "\n"
         << "}";
     return oss.str();
 }
@@ -1015,4 +1081,607 @@ std::string WebServer::generate_preview_json(std::string_view camera_name) {
     return oss.str();
 }
 
+std::string WebServer::generate_events_json(std::string_view min_level_str, uint64_t since_id, size_t limit) const {
+    if (!logger_) {
+        return "[]";
+    }
+    LogLevel min_lvl = parse_log_level(min_level_str);
+    std::vector<EventRecord> events;
+    if (since_id > 0) {
+        events = logger_->get_events_since(since_id, limit, min_lvl);
+    } else {
+        events = logger_->get_recent_events(limit, min_lvl);
+    }
+    return logger_->to_events_json(events);
+}
+
+std::string WebServer::get_events_page_html() const {
+    return R"raw_html(<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Peripheral Gateway — Live Alarms & Event Streaming</title>
+<style>
+  :root {
+    --bg: #090d16;
+    --panel: #111726;
+    --panel-elevated: #161e31;
+    --panel-hover: #1c273e;
+    --border: #222d44;
+    --border-accent: rgba(59, 130, 246, 0.4);
+    --text: #e2e8f0;
+    --muted: #8896ab;
+    --accent: #3b82f6;
+    --accent-glow: rgba(59, 130, 246, 0.25);
+    --cyan: #06b6d4;
+    --emerald: #10b981;
+    --amber: #f59e0b;
+    --rose: #ef4444;
+    --purple: #a855f7;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.5;
+    padding: 16px 20px;
+    min-height: 100vh;
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 18px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    margin-bottom: 16px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  }
+  .header-left { display: flex; align-items: center; gap: 14px; }
+  h1 { font-size: 1.15rem; font-weight: 700; letter-spacing: 0.02em; display: flex; align-items: center; gap: 10px; }
+  .badge-live {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--emerald);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+  }
+  .pulse-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--emerald);
+    box-shadow: 0 0 8px var(--emerald);
+    animation: pulse 1.6s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.85); }
+  }
+  .nav-links { display: flex; align-items: center; gap: 10px; }
+  .btn-nav {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    background: var(--panel-elevated);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition: all 0.15s ease;
+  }
+  .btn-nav:hover { background: var(--panel-hover); border-color: var(--accent); color: white; }
+
+  /* KPI Cards Grid */
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin-bottom: 16px;
+  }
+  .kpi-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.25);
+  }
+  .kpi-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+  .kpi-value { font-size: 1.4rem; font-weight: 700; font-family: var(--mono); color: white; display: flex; align-items: center; gap: 8px; }
+  .kpi-sub { font-size: 0.75rem; color: var(--muted); }
+
+  /* Active Alarms Panel */
+  .alarms-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 18px;
+    margin-bottom: 16px;
+  }
+  .alarms-panel.has-alarms { border-color: var(--rose); background: rgba(239, 68, 68, 0.05); }
+  .alarms-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .alarms-title { font-size: 0.9rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text); display: flex; align-items: center; gap: 8px; }
+  .alarms-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+  .alarm-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    background: rgba(239, 68, 68, 0.12);
+    border-left: 3px solid var(--rose);
+    font-size: 0.88rem;
+  }
+  .alarm-item.warning { background: rgba(245, 158, 11, 0.12); border-left-color: var(--amber); }
+  .alarm-badge { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; padding: 2px 6px; border-radius: 4px; }
+  .alarm-badge.alarm { background: var(--rose); color: white; }
+  .alarm-badge.warning { background: var(--amber); color: #000; }
+  .alarm-nominal { color: var(--emerald); font-size: 0.88rem; display: flex; align-items: center; gap: 8px; }
+
+  /* Toolbar */
+  .toolbar {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 16px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+  .filter-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .filter-label { font-size: 0.78rem; text-transform: uppercase; font-weight: 600; color: var(--muted); margin-right: 4px; }
+  .pill-btn {
+    background: var(--panel-elevated);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.8rem;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .pill-btn:hover { background: var(--panel-hover); color: var(--text); border-color: var(--border-accent); }
+  .pill-btn.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+    box-shadow: 0 0 10px var(--accent-glow);
+  }
+  .pill-count {
+    background: rgba(0,0,0,0.25);
+    padding: 1px 5px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-family: var(--mono);
+  }
+  .search-input {
+    background: var(--panel-elevated);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    width: 220px;
+    outline: none;
+    transition: all 0.15s;
+  }
+  .search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); width: 260px; }
+  .action-btn {
+    background: var(--panel-elevated);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 0.82rem;
+    font-weight: 600;
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .action-btn:hover { background: var(--panel-hover); border-color: var(--accent); }
+  .action-btn.active { background: rgba(59, 130, 246, 0.2); border-color: var(--accent); color: #60a5fa; }
+
+  /* Event Stream Table */
+  .table-container {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    text-align: left;
+  }
+  thead {
+    background: var(--panel-elevated);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    padding: 10px 14px;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  td {
+    padding: 10px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    vertical-align: middle;
+  }
+  tr.row-new { animation: rowSlide 0.3s ease-out; }
+  @keyframes rowSlide {
+    from { background: rgba(59, 130, 246, 0.25); transform: translateY(-4px); }
+    to { background: transparent; transform: translateY(0); }
+  }
+  tr:hover { background: var(--panel-hover); }
+
+  .mono { font-family: var(--mono); font-size: 0.82rem; }
+  .badge-lvl {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .badge-lvl.debug { background: rgba(100, 116, 139, 0.2); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.3); }
+  .badge-lvl.info { background: rgba(6, 182, 212, 0.15); color: var(--cyan); border: 1px solid rgba(6, 182, 212, 0.3); }
+  .badge-lvl.warning { background: rgba(245, 158, 11, 0.15); color: var(--amber); border: 1px solid rgba(245, 158, 11, 0.3); }
+  .badge-lvl.alarm { background: rgba(239, 68, 68, 0.2); color: var(--rose); border: 1px solid rgba(239, 68, 68, 0.4); }
+  .badge-lvl.error { background: rgba(220, 38, 38, 0.25); color: #fca5a5; border: 1px solid rgba(220, 38, 38, 0.5); }
+
+  .badge-source {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-family: var(--mono);
+    background: rgba(255,255,255,0.06);
+    color: var(--text);
+  }
+  .badge-source.cam0 { border-left: 2px solid var(--cyan); }
+  .badge-source.cam1 { border-left: 2px solid var(--purple); }
+  .badge-source.system { border-left: 2px solid var(--emerald); }
+
+  .empty-state {
+    padding: 40px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.95rem;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <h1>⚡ Peripheral Pan-Tilt Gateway <span class="badge-live"><span class="pulse-dot"></span>Live Stream</span></h1>
+  </div>
+  <div class="nav-links">
+    <a href="/" class="btn-nav">🎥 Main Viewer</a>
+    <a href="/api/state" target="_blank" class="btn-nav">📊 /api/state</a>
+    <a href="/api/events" target="_blank" class="btn-nav">⚡ /api/events</a>
+  </div>
+</header>
+
+<!-- KPI Cards -->
+<section class="kpi-grid">
+  <div class="kpi-card">
+    <div class="kpi-title">Active Alarms</div>
+    <div class="kpi-value" id="kpiAlarms" style="color:var(--emerald);">0</div>
+    <div class="kpi-sub" id="kpiAlarmsSub">All Rig Conditions Nominal</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-title">Event Ring Buffer</div>
+    <div class="kpi-value" id="kpiTotalEvents">0</div>
+    <div class="kpi-sub">Total Pushed into Atomic Ring</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-title">Ring Capacity</div>
+    <div class="kpi-value">256 Slots</div>
+    <div class="kpi-sub">Wait-Free / Lock-Free MPMC Array</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-title">Stream Status</div>
+    <div class="kpi-value" id="kpiRate" style="color:var(--cyan);">Active</div>
+    <div class="kpi-sub" id="kpiSince">Latency ~200 ms polling</div>
+  </div>
+</section>
+
+<!-- Active Alarms Panel -->
+<section class="alarms-panel" id="alarmsPanel">
+  <div class="alarms-header">
+    <div class="alarms-title" id="alarmsTitle"><span>🚨 Active System Alarms</span></div>
+    <span class="mono" id="alarmsCount" style="font-size:0.8rem; color:var(--muted);">0 Active</span>
+  </div>
+  <div id="alarmsContainer">
+    <div class="alarm-nominal">✔ No active system faults, link drops, or motor stalls detected.</div>
+  </div>
+</section>
+
+<!-- Filter Toolbar -->
+<section class="toolbar">
+  <div class="filter-group">
+    <span class="filter-label">Level:</span>
+    <button class="pill-btn active" data-level="all" onclick="setLevelFilter('all')">ALL <span class="pill-count" id="cntAll">0</span></button>
+    <button class="pill-btn" data-level="debug" onclick="setLevelFilter('debug')">DEBUG <span class="pill-count" id="cntDebug">0</span></button>
+    <button class="pill-btn" data-level="info" onclick="setLevelFilter('info')">INFO <span class="pill-count" id="cntInfo">0</span></button>
+    <button class="pill-btn" data-level="warning" onclick="setLevelFilter('warning')">WARN <span class="pill-count" id="cntWarn">0</span></button>
+    <button class="pill-btn" data-level="alarm" onclick="setLevelFilter('alarm')">ALARM <span class="pill-count" id="cntAlarm">0</span></button>
+    <button class="pill-btn" data-level="error" onclick="setLevelFilter('error')">ERROR <span class="pill-count" id="cntError">0</span></button>
+  </div>
+
+  <div class="filter-group">
+    <span class="filter-label">Source:</span>
+    <button class="pill-btn active" data-source="all" onclick="setSourceFilter('all')">ALL</button>
+    <button class="pill-btn" data-source="cam0" onclick="setSourceFilter('cam0')">cam0</button>
+    <button class="pill-btn" data-source="cam1" onclick="setSourceFilter('cam1')">cam1</button>
+    <button class="pill-btn" data-source="system" onclick="setSourceFilter('system')">system</button>
+  </div>
+
+  <div class="filter-group">
+    <input type="text" id="searchInput" class="search-input" placeholder="Search events..." oninput="onSearchChange()">
+    <button id="btnScroll" class="action-btn active" onclick="toggleAutoScroll()">Auto-Scroll: ON</button>
+    <button id="btnPause" class="action-btn" onclick="togglePause()">Pause</button>
+    <button class="action-btn" onclick="clearEvents()">Clear View</button>
+    <button class="action-btn" onclick="exportJson()">Export JSON</button>
+  </div>
+</section>
+
+<!-- Live Events Table -->
+<div class="table-container">
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 70px;">ID</th>
+        <th style="width: 140px;">Time Ago</th>
+        <th style="width: 90px;">Level</th>
+        <th style="width: 90px;">Source</th>
+        <th style="width: 180px;">Event Code</th>
+        <th>Message Details</th>
+      </tr>
+    </thead>
+    <tbody id="eventTbody">
+      <tr><td colspan="6" class="empty-state">Waiting for gateway event stream...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+  let allEvents = [];
+  let highestId = 0;
+  let activeLevel = 'all';
+  let activeSource = 'all';
+  let searchQuery = '';
+  let autoScroll = true;
+  let isPaused = false;
+  let counts = { all: 0, debug: 0, info: 0, warning: 0, alarm: 0, error: 0 };
+
+  function setLevelFilter(lvl) {
+    activeLevel = lvl;
+    document.querySelectorAll('[data-level]').forEach(b => b.classList.toggle('active', b.dataset.level === lvl));
+    renderEvents();
+  }
+
+  function setSourceFilter(src) {
+    activeSource = src;
+    document.querySelectorAll('[data-source]').forEach(b => b.classList.toggle('active', b.dataset.source === src));
+    renderEvents();
+  }
+
+  function onSearchChange() {
+    searchQuery = document.getElementById('searchInput').value.trim().toLowerCase();
+    renderEvents();
+  }
+
+  function toggleAutoScroll() {
+    autoScroll = !autoScroll;
+    const b = document.getElementById('btnScroll');
+    b.textContent = autoScroll ? 'Auto-Scroll: ON' : 'Auto-Scroll: OFF';
+    b.classList.toggle('active', autoScroll);
+  }
+
+  function togglePause() {
+    isPaused = !isPaused;
+    const b = document.getElementById('btnPause');
+    b.textContent = isPaused ? 'Resume' : 'Pause';
+    b.classList.toggle('active', isPaused);
+    document.getElementById('kpiRate').textContent = isPaused ? 'Paused' : 'Active';
+    document.getElementById('kpiRate').style.color = isPaused ? 'var(--amber)' : 'var(--cyan)';
+  }
+
+  function clearEvents() {
+    allEvents = [];
+    counts = { all: 0, debug: 0, info: 0, warning: 0, alarm: 0, error: 0 };
+    updateCounts();
+    renderEvents();
+  }
+
+  function exportJson() {
+    const blob = new Blob([JSON.stringify(allEvents, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `peripheral_events_${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function timeAgo(atUs) {
+    if (!atUs) return 'just now';
+    const nowUs = Date.now() * 1000;
+    const diffUs = nowUs - atUs;
+    if (diffUs < 1000000) return 'just now';
+    const s = Math.floor(diffUs / 1000000);
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    return `${h}h ago`;
+  }
+
+  function updateCounts() {
+    document.getElementById('cntAll').textContent = counts.all;
+    document.getElementById('cntDebug').textContent = counts.debug;
+    document.getElementById('cntInfo').textContent = counts.info;
+    document.getElementById('cntWarn').textContent = counts.warning;
+    document.getElementById('cntAlarm').textContent = counts.alarm;
+    document.getElementById('cntError').textContent = counts.error;
+    document.getElementById('kpiTotalEvents').textContent = allEvents.length;
+  }
+
+  function renderEvents() {
+    const tbody = document.getElementById('eventTbody');
+    const filtered = allEvents.filter(e => {
+      if (activeLevel !== 'all' && e.level !== activeLevel) return false;
+      const src = (e.cameraId || 'system').toLowerCase();
+      if (activeSource !== 'all' && src !== activeSource) return false;
+      if (searchQuery) {
+        const text = `${e.code || ''} ${e.message || ''} ${src}`.toLowerCase();
+        if (!text.includes(searchQuery)) return false;
+      }
+      return true;
+    });
+
+    if (filtered.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No events matching the active filter.</td></tr>';
+      return;
+    }
+
+    let html = '';
+    // Display newest events at top
+    for (const e of filtered.slice(0, 150)) {
+      const src = e.cameraId || 'system';
+      const lvl = (e.level || 'info').toLowerCase();
+      html += `<tr>
+        <td class="mono" style="color:var(--muted);">${e.id}</td>
+        <td class="mono">${timeAgo(e.atUs)}</td>
+        <td><span class="badge-lvl ${lvl}">${lvl}</span></td>
+        <td><span class="badge-source ${src}">${src}</span></td>
+        <td class="mono" style="font-weight:600; color:var(--text);">${e.code || 'event'}</td>
+        <td>${escapeHtml(e.message || '')}</td>
+      </tr>`;
+    }
+    tbody.innerHTML = html;
+
+    if (autoScroll && tbody.rows.length > 0) {
+      tbody.rows[0].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  async function pollEvents() {
+    if (isPaused) return;
+    try {
+      const res = await fetch(`/api/events?since_id=${highestId}&limit=100`);
+      if (res.ok) {
+        const newEvents = await res.json();
+        if (Array.isArray(newEvents) && newEvents.length > 0) {
+          for (const ev of newEvents) {
+            if (ev.id > highestId) {
+              highestId = ev.id;
+              allEvents.unshift(ev);
+              counts.all++;
+              const lvl = (ev.level || 'info').toLowerCase();
+              if (counts[lvl] !== undefined) counts[lvl]++;
+            }
+          }
+          if (allEvents.length > 1000) allEvents.length = 1000;
+          updateCounts();
+          renderEvents();
+        }
+      }
+    } catch (err) {}
+  }
+
+  async function pollAlarms() {
+    try {
+      const res = await fetch('/api/state');
+      if (res.ok) {
+        const data = await res.json();
+        const alarms = data.alarms || [];
+        const panel = document.getElementById('alarmsPanel');
+        const container = document.getElementById('alarmsContainer');
+        const kpiAlarms = document.getElementById('kpiAlarms');
+        const kpiAlarmsSub = document.getElementById('kpiAlarmsSub');
+        const countSpan = document.getElementById('alarmsCount');
+
+        countSpan.textContent = `${alarms.length} Active`;
+        kpiAlarms.textContent = alarms.length;
+
+        if (alarms.length > 0) {
+          panel.classList.add('has-alarms');
+          kpiAlarms.style.color = 'var(--rose)';
+          kpiAlarmsSub.textContent = 'Active System Anomaly Detected';
+          let html = '<ul class="alarms-list">';
+          for (const a of alarms) {
+            const sev = (a.severity || 'warning').toLowerCase();
+            const src = a.cameraId || 'system';
+            html += `<li class="alarm-item ${sev}">
+              <span class="alarm-badge ${sev}">${sev}</span>
+              <span class="badge-source ${src}">${src}</span>
+              <b>${escapeHtml(a.code || '')}</b>
+              <span>${escapeHtml(a.message || '')}</span>
+            </li>`;
+          }
+          html += '</ul>';
+          container.innerHTML = html;
+        } else {
+          panel.classList.remove('has-alarms');
+          kpiAlarms.style.color = 'var(--emerald)';
+          kpiAlarmsSub.textContent = 'All Rig Conditions Nominal';
+          container.innerHTML = '<div class="alarm-nominal">✔ No active system faults, link drops, or motor stalls detected.</div>';
+        }
+      }
+    } catch (err) {}
+  }
+
+  setInterval(pollEvents, 200);
+  setInterval(pollAlarms, 600);
+  pollEvents();
+  pollAlarms();
+</script>
+</body>
+</html>)raw_html";
+}
+
 } // namespace peripheral
+

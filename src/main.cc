@@ -24,6 +24,7 @@ int main(int argc, char* argv[]) {
     int timeout_ms = -1;
     size_t pool_slots = 64;
     double pool_mb = -1.0;
+    std::string log_level_str = "info";
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -33,12 +34,20 @@ int main(int argc, char* argv[]) {
             pool_slots = std::stoul(argv[++i]);
         } else if (arg == "--pool-mb" && i + 1 < argc) {
             pool_mb = std::stod(argv[++i]);
+        } else if (arg == "--log-level" && i + 1 < argc) {
+            log_level_str = argv[++i];
         }
     }
+
+    auto log_level = peripheral::parse_log_level(log_level_str);
+    auto& event_logger = peripheral::EventLogger::instance();
+    event_logger.set_log_level(log_level);
 
     std::cout << "====================================================\n";
     std::cout << " Peripheral Camera Gateway - Ingress & Web Server   \n";
     std::cout << "====================================================\n";
+    std::cout << "[EventLogger] Minimum Log Level: " << peripheral::to_string(log_level)
+              << " | Atomic Ring Buffer: " << event_logger.ring_capacity() << " slots\n\n";
 
     const auto endpoints = peripheral::CameraEndpoint::default_endpoints();
 
@@ -92,6 +101,7 @@ int main(int argc, char* argv[]) {
     peripheral::WebServer web_server(web_cfg);
     web_server.set_recorder(&disk_recorder);
     web_server.set_cloud_uploader(&cloud_uploader);
+    web_server.set_event_logger(&event_logger);
 
     std::vector<std::unique_ptr<peripheral::CameraSession>> sessions;
 
@@ -125,12 +135,20 @@ int main(int argc, char* argv[]) {
             // Ingress 2 Hz status arrives here
         });
 
-        session->set_state_callback([&disk_recorder, cam_name](std::string_view stream_name, peripheral::SocketState state) {
+        session->set_state_callback([&disk_recorder, &event_logger, cam_name](std::string_view stream_name, peripheral::SocketState state) {
             const char* state_str = (state == peripheral::SocketState::Connected) ? "Connected" :
                                     (state == peripheral::SocketState::Connecting) ? "Connecting" :
                                     (state == peripheral::SocketState::Disconnected) ? "Disconnected (Retrying)" : "Error";
             std::cout << "    [" << stream_name << "] State: " << state_str << "\n";
-            disk_recorder.on_connection_state(cam_name, state == peripheral::SocketState::Connected);
+            bool is_connected = (state == peripheral::SocketState::Connected);
+            disk_recorder.on_connection_state(cam_name, is_connected);
+            if (is_connected) {
+                event_logger.info(cam_name, "link_connected", "Camera " + cam_name + " connected (" + std::string(stream_name) + ")");
+                event_logger.update_camera_link(cam_name, true, true);
+            } else {
+                event_logger.warning(cam_name, "camera_link_down", "Camera " + cam_name + " disconnected (" + std::string(stream_name) + ")");
+                event_logger.update_camera_link(cam_name, false, false);
+            }
         });
 
         web_server.register_session(session.get());
@@ -144,7 +162,10 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    event_logger.info("system", "server_started", "Peripheral Camera Gateway started on port " + std::to_string(web_cfg.port));
+
     std::cout << "Gateway running. Web Viewer accessible at: http://localhost:" << web_cfg.port << "\n";
+    std::cout << "Live Events & Alarms stream page: http://localhost:" << web_cfg.port << "/events\n";
     std::cout << "Press Ctrl+C to terminate.\n";
 
     auto start_time = std::chrono::steady_clock::now();
@@ -160,6 +181,7 @@ int main(int argc, char* argv[]) {
             for (size_t idx = 0; idx < sessions.size(); ++idx) {
                 const auto& session = sessions[idx];
                 const auto& tf = session->time_filter();
+                event_logger.update_clock_sync(session->name(), tf.is_synchronized(), 0.0);
                 if (idx > 0) std::cout << " | ";
                 std::cout << session->name() << ": "
                           << (tf.is_synchronized() ? "SYNCED" : "ACQ")
@@ -168,6 +190,7 @@ int main(int argc, char* argv[]) {
                           << ", Frames=" << session->valid_frames() << ")";
             }
             std::cout << "\n";
+            event_logger.update_disk_usage(disk_recorder.total_disk_used_bytes(), disk_recorder.disk_quota_bytes());
         }
 
         if (timeout_ms > 0) {
@@ -180,6 +203,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "\nShutting down...\n";
+    event_logger.info("system", "server_stopping", "Peripheral Camera Gateway shutting down gracefully");
     web_server.stop();
     cloud_uploader.stop();
     for (auto& session : sessions) {

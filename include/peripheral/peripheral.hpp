@@ -41,3 +41,7 @@
 #include "peripheral/crypto/sha256.hpp"
 #include "peripheral/storage/disk_recorder.hpp"
 #include "peripheral/storage/cloud_uploader.hpp"
+
+// 7. Event & Notification Subsystem
+#include "peripheral/events/atomic_event_ring.hpp"
+#include "peripheral/events/event_logger.hpp"

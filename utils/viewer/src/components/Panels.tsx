@@ -292,8 +292,11 @@ export function AlarmList({ alarms, serverNowUs }: { alarms: Alarm[]; serverNowU
 export function EventLog({ events, serverNowUs }: { events: ServerEvent[]; serverNowUs: number | null }) {
   return (
     <section className="panel events">
-      <header>
+      <header style={{ display: 'flex', alignItems: 'center' }}>
         <h2>Events</h2>
+        <a href="/events" target="_blank" className="link" style={{ marginLeft: 'auto', fontSize: '12px' }}>
+          Open Live Stream ↗
+        </a>
       </header>
       {events.length === 0 ? (
         <p className="muted">No events since the page opened.</p>

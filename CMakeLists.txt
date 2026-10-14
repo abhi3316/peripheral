@@ -167,6 +167,16 @@ target_link_libraries(test_offline_capture PRIVATE
 
 add_test(NAME OfflineCaptureTest COMMAND test_offline_capture)
 
+add_executable(test_atomic_event_ring
+    tests/test_atomic_event_ring.cc
+)
+
+target_link_libraries(test_atomic_event_ring PRIVATE
+    peripheral_socket
+)
+
+add_test(NAME EventRingTest COMMAND test_atomic_event_ring)
+
 # Python Functional Test with Virtual Camera Simulator
 find_package(Python3 COMPONENTS Interpreter)
 if (Python3_Interpreter_FOUND)

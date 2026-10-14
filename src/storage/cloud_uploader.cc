@@ -1,4 +1,5 @@
 #include "peripheral/storage/cloud_uploader.hpp"
+#include "peripheral/events/event_logger.hpp"
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -250,6 +251,8 @@ void CloudUploader::worker_loop() {
             if (marker_file.is_open()) {
                 marker_file << sha256 << "\n";
             }
+
+            EventLogger::instance().info("system", "chunk_uploaded", "Confirmed upload of " + current_task.object_key + " to cloud storage");
 
             // Notify callback
             if (on_completed_cb_) {

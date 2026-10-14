@@ -19,6 +19,8 @@
 namespace peripheral {
 
 class CloudUploader;
+class EventLogger;
+enum class LogLevel : uint8_t;
 
 struct WebServerConfig {
     std::string host{"0.0.0.0"};
@@ -66,6 +68,12 @@ public:
     void set_cloud_uploader(CloudUploader* uploader) noexcept {
         uploader_ = uploader;
     }
+    void set_event_logger(EventLogger* logger) noexcept {
+        logger_ = logger;
+    }
+    [[nodiscard]] EventLogger* event_logger() const noexcept {
+        return logger_;
+    }
 
     bool start();
     void stop();
@@ -81,6 +89,8 @@ private:
 
     std::string generate_state_json();
     std::string generate_preview_json(std::string_view camera_name);
+    std::string generate_events_json(std::string_view min_level_str, uint64_t since_id, size_t limit) const;
+    std::string get_events_page_html() const;
 
     WebServerConfig config_;
     std::atomic<bool> running_{false};
@@ -95,6 +105,7 @@ private:
     // Storage & Recording management
     DiskRecorder* recorder_{nullptr};
     CloudUploader* uploader_{nullptr};
+    EventLogger* logger_{nullptr};
 };
 
 } // namespace peripheral

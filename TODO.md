@@ -19,10 +19,10 @@ This document outlines the architectural status of the **Peripheral Camera Gatew
 | **Official Operator React Viewer** | **Complete** | Full integration with `utils/viewer` on port 5173 and bundled at 8080 |
 | **One-Shot Runner Script** | **Complete** | `./run.sh` orchestrates simulator, server, and viewer with graceful `Ctrl+C` teardown |
 | **Docker Containerization** | **Complete** | `Dockerfile` & `docker-compose.yml` on Ubuntu 24.04 (GCC 14, C++26, Node 22, 1 CPU / 250 MB RAM) |
-| **Unit & Functional Test Suite** | **Complete** | 11/11 CTest unit & functional test suites pass 100% |
+| **Unit & Functional Test Suite** | **Complete** | 12/12 CTest unit & functional test suites pass 100% |
 | **Cloud Storage Uplink Worker** | **Complete** | Background worker streaming completed chunks to port 7100 with SHA-256 and retries |
 | **Offline Capture Dataset Validation** | **Complete** | Replay harness against `utils/data/capture/` verifying sequence, pose, and fate matching |
-| **Live Alarms & Event Log Streaming** | **Pending** | Populating `alarms` and `events` arrays in `/api/state` for viewer alerts |
+| **Live Alarms & Event Log Streaming** | **Complete** | Lock-free wait-free atomic ring buffer, level classification flag, dedicated `/events` streaming page, `/api/events` and `/api/state` |
 | **Automatic Local Disk Pruning** | **Complete** | Prunes confirmed uploaded chunks at 80% threshold (1.6 GB) while preserving manifests, safe gap accounting at 95% quota |
 | **GitHub Actions CI/CD Pipeline** | **Complete** | Automated multi-platform builds, unit tests, and artifact uploads on push / manual dispatch |
 
@@ -82,23 +82,32 @@ This document outlines the architectural status of the **Peripheral Camera Gatew
 
 ---
 
-### 3. Live Alarms & Event Log Streaming
-**Objective**: Surface runtime anomalies, motor faults, and network status changes into the viewer's `AlarmList` and `EventLog` components.
+### 3. Live Alarms & Event Log Streaming (`include/peripheral/events/`)
+**Status**: **COMPLETE** (Implemented in `include/peripheral/events/atomic_event_ring.hpp`, `include/peripheral/events/event_logger.hpp`, `src/web/web_server.cc`, `src/main.cc`, tested in `tests/test_atomic_event_ring.cc` with 12/12 CTest suites passing).
+**Objective**: Surface runtime anomalies, motor faults, and network status changes into the viewer's `AlarmList` and `EventLog` components and a dedicated `/events` live streaming dashboard.
 
-- [ ] **Alarm Management**:
-  - Raise `warning` or `alarm` entries in `/api/state` when:
-    - Camera control or video link drops (`camera_link_down`).
-    - Pan or tilt motor stalls (`motor_stalled`).
-    - Clock drift exceeds 100 ppm or clock synchronization is lost.
-    - Disk usage exceeds 85% of 2 GB quota (`disk_near_full`).
-  - Clear alarms automatically when conditions normalize.
-- [ ] **Server Event Log Ring Buffer**:
-  - Maintain a circular buffer of recent events (last 50 events) with monotonic timestamps:
-    - Camera connected / reconnected.
-    - Recording session started / stopped.
-    - Chunk file rotated (`part-XXXX.bin`).
-    - Chunk uploaded to cloud storage.
-  - Expose in `/api/state` or `/api/events` so `utils/viewer` displays them in the `Events` panel.
+- [x] **Lock-Free Atomic Event Ring Buffer**:
+  - Implemented `AtomicEventRingBuffer<256>` with wait-free ticket generation using `std::atomic<uint64_t>` sequence indexing and acquire/release memory semantics without mutex locks.
+  - Zero heap allocation during event push operations; fixed-size slot array.
+- [x] **Log Level Classification & Filter Flags**:
+  - Log levels: `DEBUG`, `INFO`, `WARNING`, `ALARM`, `ERROR`.
+  - Configurable server CLI flag `--log-level <DEBUG|INFO|WARN|ALARM|ERROR>`.
+  - HTTP endpoint query filter support: `GET /api/events?level=...&since_id=...&limit=...`.
+  - Interactive UI level filter pills on the separated live streaming page.
+- [x] **Alarm State Machine & Automatic Normalization**:
+  - Automatically raises and clears alarms on runtime state transitions:
+    - Camera connection / link drops (`camera_link_down`).
+    - Pan/tilt motor stalls (`motor_stalled`).
+    - PTP clock synchronization lost or drift > 100 ppm (`clock_sync_lost`).
+    - Local disk usage exceeding 85% of 2 GB quota (`disk_near_full`).
+  - Active alarms seamlessly surfaced in `/api/state` (`"alarms": [...]`) for viewer `AlarmList`.
+- [x] **Separated Live Streaming Dashboard (`/events`)**:
+  - Dedicated, beautifully styled real-time dashboard served directly by the gateway at `/events` and `/logs`.
+  - Real-time pulse indicator, KPI cards (Active Alarms, Ring Buffer Size, Capacity, Latency).
+  - Search filtering, auto-scroll toggle, pause/resume, and JSON export.
+  - Quick-launch links embedded in main operator viewer.
+- [x] **Validation**:
+  - `test_atomic_event_ring.cc` tests basic operations, 4-thread multi-producer concurrency and ring wrapping, level filtering, and alarm auto-normalization.
 
 ---
 

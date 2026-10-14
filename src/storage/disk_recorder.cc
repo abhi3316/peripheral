@@ -1,5 +1,6 @@
 #include "peripheral/storage/disk_recorder.hpp"
 #include "peripheral/storage/cloud_uploader.hpp"
+#include "peripheral/events/event_logger.hpp"
 #include <algorithm>
 #include <iomanip>
 #include <iostream>
@@ -113,6 +114,7 @@ bool DiskRecorder::start_recording(std::string_view recording_id) {
     write_manifest_locked();
 
     std::cout << "[DiskRecorder] Started recording " << id << " in " << current_rec_dir_ << "\n";
+    EventLogger::instance().info("system", "recording_started", "Recording session " + id + " started");
     return true;
 }
 
@@ -141,6 +143,7 @@ bool DiskRecorder::stop_recording() {
 
     std::cout << "[DiskRecorder] Stopped recording " << current_rec_.recording_id
               << ": " << current_rec_.frames << " frames (" << current_rec_.bytes << " bytes)\n";
+    EventLogger::instance().info("system", "recording_stopped", "Recording session " + current_rec_.recording_id + " stopped (" + std::to_string(current_rec_.frames) + " frames)");
     return true;
 }
 
@@ -203,6 +206,7 @@ void DiskRecorder::on_frame(std::string_view camera_id, const VideoFrame& frame)
         gap.to_seq = frame.header.frame_seq;
         gap.reason = "disk_full";
         current_rec_.gaps.push_back(gap);
+        EventLogger::instance().alarm("system", "disk_full", "Emergency disk quota exceeded (" + std::to_string(current_disk_used) + " bytes); frame dropped");
         return;
     }
 
@@ -400,6 +404,7 @@ uint64_t DiskRecorder::reclaim_disk_space_locked() {
     if (bytes_reclaimed > 0) {
         std::cout << "[DiskRecorder] Reclaimed " << bytes_reclaimed << " bytes from uploaded chunks. "
                   << "Total disk used now: " << current_used << " bytes.\n";
+        EventLogger::instance().warning("system", "disk_reclaimed", "Pruned " + std::to_string(bytes_reclaimed) + " bytes of uploaded chunks");
     }
     return bytes_reclaimed;
 }
@@ -425,6 +430,7 @@ void DiskRecorder::open_next_chunk_locked() {
 
     chunk_file_.open(chunk_path, std::ios::binary | std::ios::trunc);
     chunk_bytes_written_ = 0;
+    EventLogger::instance().info("system", "chunk_rotated", "Opened chunk " + current_chunk_filename_);
 }
 
 void DiskRecorder::close_current_chunk_locked() {

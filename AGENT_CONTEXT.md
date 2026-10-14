@@ -60,25 +60,42 @@ The project follows a subsystem/component-based architecture under `include/peri
 ### 6. Web & Operator Serving Subsystem (`include/peripheral/web/`, `src/web/`)
 - `web_server.hpp` / `web_server.cc`: Embedded REST API server on port 8080 and static file server for `utils/viewer/dist`.
 - Exposes recording control endpoints: `POST /api/recording/start`, `POST /api/recording/stop`, `GET /api/recordings`.
-- Surfaces active recording state, disk pipeline metrics, and live cloud upload telemetry in `/api/state`.
+- Exposes live event streaming: `GET /api/events` (with `level`, `since_id`, and `limit` query parameters).
+- Dedicated Live Streaming Dashboard: Serves rich, standalone real-time dashboard at `/events` and `/logs` with level filter pills, active alarm status cards, search filter, auto-scroll, and JSON export.
+- Surfaces active recording state, disk pipeline metrics, live cloud upload telemetry, active alarms array, and event stream in `/api/state`.
 
-### 7. Master Umbrella Headers (`include/peripheral.hpp` & `include/peripheral/peripheral.hpp`)
+### 7. Event & Notification Subsystem (`include/peripheral/events/`)
+- `atomic_event_ring.hpp`: High-throughput, lock-free, wait-free circular buffer (`AtomicEventRingBuffer<256>`):
+  - Uses `std::atomic<uint64_t>` ticket-based sequence indexing with acquire/release memory semantics without mutex locks.
+  - Zero runtime heap allocation during event push operations; fixed-size slot array.
+  - Classified Log Levels: `DEBUG`, `INFO`, `WARNING`, `ALARM`, `ERROR`.
+- `event_logger.hpp`: Centralized logging engine and active alarm state machine:
+  - Automatically manages, raises, and normalizes alarms:
+    - `camera_link_down`: Raised when control or video connection drops; cleared when restored.
+    - `motor_stalled`: Raised on pan/tilt motor stall or status fault; cleared when normalized.
+    - `clock_sync_lost`: Raised when clock synchronization is lost or drift > 100 ppm; cleared when synchronized.
+    - `disk_near_full`: Raised when local disk usage exceeds 85% quota; cleared when usage drops below 80%.
+  - Pushes event notifications to the atomic ring buffer on every alarm transition, recording lifecycle event, chunk rotation, cloud upload confirmation, and disk reclamation.
+
+### 8. Master Umbrella Headers (`include/peripheral.hpp` & `include/peripheral/peripheral.hpp`)
 - Provides a single, clean generic entry point for consumers: `#include "peripheral/peripheral.hpp"` or `#include <peripheral.hpp>`.
-- Aggregates all subsystems (`transport`, `memory`, `protocol`, `camera`, `storage`, `web`).
+- Aggregates all subsystems (`transport`, `memory`, `protocol`, `camera`, `storage`, `web`, `events`).
 - Completely eliminates redundant loose header files in `include/peripheral/`.
 
-### 8. Application Gateway Entrypoint (`src/main.cc`)
+### 9. Application Gateway Entrypoint (`src/main.cc`)
 - Uses single umbrella include `#include "peripheral/peripheral.hpp"`.
-- CLI flag parsing (`--pool-mb`, `--pool-slots`, `--timeout-ms`), slab memory pool initialization, endpoint partitioning, disk recorder lifecycle, and session lifecycle.
+- CLI flag parsing (`--pool-mb`, `--pool-slots`, `--timeout-ms`, `--log-level`), slab memory pool initialization, endpoint partitioning, disk recorder lifecycle, session lifecycle, and event logger.
   - CLI Flags in `src/main.cc`:
     - `--pool-mb <N>`: Configure total memory pool size in Megabytes (e.g. `--pool-mb 48`).
     - `--pool-slots <N>`: Configure total number of slots directly (e.g. `--pool-slots 64`).
+    - `--timeout-ms <N>`: Execution timeout in milliseconds (or -1 for continuous run).
+    - `--log-level <LEVEL>`: Minimum log level classification flag (`DEBUG`, `INFO`, `WARN`, `ALARM`, `ERROR`).
 
 ---
 
 ## Build System (`CMakeLists.txt`)
 - Targets:
-  - `peripheral_socket`: Core library (includes `frame_pool.cc`, `disk_recorder.cc`).
+  - `peripheral_socket`: Core library (includes `frame_pool.cc`, `disk_recorder.cc`, `cloud_uploader.cc`, `web_server.cc`).
   - `peripheral_server`: Main gateway server executable.
   - `test_socket`: Socket unit tests.
   - `test_stream_capture`: Stream capture tests.
@@ -90,8 +107,9 @@ The project follows a subsystem/component-based architecture under `include/peri
   - `test_disk_recorder`: Unit tests for dual-camera chunking, gap detection, manifest persistence, automatic 80% disk reclamation, unuploaded chunk protection, and 95% emergency quota gap accounting.
   - `test_cloud_uploader`: Unit tests for streaming SHA-256 calculation, HTTP PUT object upload, and backlog telemetry.
   - `test_offline_capture`: Offline capture dataset validation suite benchmarking clock recovery (<100 µs), pose interpolation (<0.1°), 100% frame fate precision, and all 6 milestone events against `utils/data/capture/`.
+  - `test_atomic_event_ring`: Unit tests for atomic lock-free ring buffer, 4-thread multi-producer concurrency, level filtering, and alarm auto-normalization.
   - `FunctionalCameraTest` (`tests/test_functional_camera.py`): End-to-end Python functional test suite.
-- All tests pass 100% (11/11 tests passing).
+- All tests pass 100% (12/12 tests passing).
 - Verified against `utils/tools` (`npm run camera`): Real-time synchronization active, Δt offset tracking, <300 µs network RTT, 25 fps per-camera frame delivery.
 
 ---
