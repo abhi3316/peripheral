@@ -24,7 +24,7 @@ This document outlines the architectural status of the **Peripheral Camera Gatew
 | **Offline Capture Dataset Validation** | **Pending** | Replay harness against `utils/data/capture/` verifying sequence, pose, and fate matching |
 | **Live Alarms & Event Log Streaming** | **Pending** | Populating `alarms` and `events` arrays in `/api/state` for viewer alerts |
 | **Automatic Local Disk Pruning** | **Pending** | Pruning confirmed uploaded chunks when approaching the 2 GB disk quota |
-| **GitHub Actions CI/CD Pipeline** | **Pending** | Automated multi-platform builds and test execution on push |
+| **GitHub Actions CI/CD Pipeline** | **Complete** | Automated multi-platform builds, unit tests, and artifact uploads on push / manual dispatch |
 
 ---
 
@@ -112,13 +112,14 @@ This document outlines the architectural status of the **Peripheral Camera Gatew
 
 ---
 
-### 5. Automated CI/CD Pipeline (`.github/workflows/ci.yml`)
-**Objective**: Guarantee that every commit and pull request compiles cleanly, passes all unit tests, and verifies Docker image builds.
+### 5. Automated CI/CD & Artifacts Pipeline (`.github/workflows/build-and-release.yml`)
+**Status**: **Complete**
 
-- [ ] **GitHub Actions Workflow**:
-  - Matrix build across:
-    - Ubuntu 24.04 (GCC 14 / Clang 18)
-    - macOS Latest (AppleClang)
-  - Execute `cmake -B build && cmake --build build && ctest --test-dir build --output-on-failure`.
-  - Build Docker container: `docker build -t peripheral-gateway .`.
-  - Run containerized functional test run with `--timeout-ms 2000`.
+- [x] **GitHub Actions Workflow**:
+  - Builds Linux x86_64 binaries with GCC 14 (C++26) on Ubuntu 24.04.
+  - Builds macOS ARM64 binaries on Apple Silicon.
+  - Runs 100% of unit/functional tests (`ctest`) on each platform.
+  - Compiles the React Operator Viewer bundle (`npm run build`).
+  - Verifies containerized execution with `docker build` and smoke tests.
+  - Packages and uploads downloadable tarballs (`peripheral-linux-x86_64.tar.gz` and `peripheral-macos-arm64.tar.gz`) to GitHub Actions Artifacts.
+  - Supports manual on-demand triggers via `workflow_dispatch`.

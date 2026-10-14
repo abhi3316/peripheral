@@ -1,0 +1,143 @@
+name: Build & Package Artifacts
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch: # Allows manual trigger from GitHub Actions web UI
+
+jobs:
+  build-linux:
+    name: Linux (Ubuntu 24.04, GCC 14, C++26)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install C++26 Build Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-14 \
+            gcc-14 \
+            cmake \
+            ninja-build \
+            lsof \
+            jq
+
+      - name: Configure & Build C++26 Peripheral Server
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
+          cmake --build build -j
+
+      - name: Run Test Suite
+        run: |
+          ctest --test-dir build --output-on-failure
+
+      - name: Build Official Operator Viewer Bundle
+        run: |
+          cd utils/viewer
+          npm ci
+          npm run build
+
+      - name: Prepare Tools & Simulator
+        run: |
+          cd utils/tools
+          npm ci
+
+      - name: Assemble Release Package
+        run: |
+          mkdir -p release-linux/utils/viewer release-linux/utils/tools release-linux/utils/data
+          cp build/peripheral_server release-linux/
+          cp run.sh release-linux/
+          cp README.md release-linux/
+          cp -r utils/viewer/dist release-linux/utils/viewer/
+          cp -r utils/viewer/package*.json release-linux/utils/viewer/
+          cp -r utils/tools/package*.json release-linux/utils/tools/
+          cp -r utils/tools/camera release-linux/utils/tools/
+          cp -r utils/tools/node_modules release-linux/utils/tools/
+          cp -r utils/data/motion.csv release-linux/utils/data/
+          chmod +x release-linux/peripheral_server release-linux/run.sh
+          tar -czvf peripheral-linux-x86_64.tar.gz -C release-linux .
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: peripheral-linux-x86_64
+          path: peripheral-linux-x86_64.tar.gz
+          retention-days: 30
+
+  build-macos:
+    name: macOS (Apple Silicon arm64, C++26)
+    runs-on: macos-14
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configure & Build C++26 Peripheral Server
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+
+      - name: Run Test Suite
+        run: |
+          ctest --test-dir build --output-on-failure
+
+      - name: Build Official Operator Viewer Bundle
+        run: |
+          cd utils/viewer
+          npm ci
+          npm run build
+
+      - name: Assemble Release Package
+        run: |
+          mkdir -p release-macos/utils/viewer release-macos/utils/tools release-macos/utils/data
+          cp build/peripheral_server release-macos/
+          cp run.sh release-macos/
+          cp README.md release-macos/
+          cp -r utils/viewer/dist release-macos/utils/viewer/
+          cp -r utils/viewer/package*.json release-macos/utils/viewer/
+          cp -r utils/tools/package*.json release-macos/utils/tools/
+          cp -r utils/tools/camera release-macos/utils/tools/
+          cp -r utils/data/motion.csv release-macos/utils/data/
+          chmod +x release-macos/peripheral_server release-macos/run.sh
+          tar -czvf peripheral-macos-arm64.tar.gz -C release-macos .
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: peripheral-macos-arm64
+          path: peripheral-macos-arm64.tar.gz
+          retention-days: 30
+
+  docker-verification:
+    name: Docker Container Build & Validation
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker Container
+        run: |
+          docker build -t peripheral-gateway .
+
+      - name: Run Containerized Smoke Test
+        run: |
+          docker run --rm peripheral-gateway --timeout-ms 2000
