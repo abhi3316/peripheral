@@ -65,6 +65,7 @@ jobs:
           cp -r utils/viewer/package*.json release-linux/utils/viewer/
           cp -r utils/tools/package*.json release-linux/utils/tools/
           cp -r utils/tools/camera release-linux/utils/tools/
+          cp -r utils/tools/storage release-linux/utils/tools/
           cp -r utils/tools/node_modules release-linux/utils/tools/
           cp -r utils/data/motion.csv release-linux/utils/data/
           chmod +x release-linux/peripheral_server release-linux/run.sh
@@ -115,6 +116,7 @@ jobs:
           cp -r utils/viewer/package*.json release-macos/utils/viewer/
           cp -r utils/tools/package*.json release-macos/utils/tools/
           cp -r utils/tools/camera release-macos/utils/tools/
+          cp -r utils/tools/storage release-macos/utils/tools/
           cp -r utils/data/motion.csv release-macos/utils/data/
           chmod +x release-macos/peripheral_server release-macos/run.sh
           tar -czvf peripheral-macos-arm64.tar.gz -C release-macos .

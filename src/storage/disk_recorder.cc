@@ -1,4 +1,5 @@
 #include "peripheral/storage/disk_recorder.hpp"
+#include "peripheral/storage/cloud_uploader.hpp"
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -125,6 +126,14 @@ bool DiskRecorder::stop_recording() {
     current_rec_.complete = true;
 
     write_manifest_locked();
+
+    if (uploader_ && !current_rec_dir_.empty()) {
+        uploader_->enqueue(current_rec_.recording_id,
+                           current_rec_.recording_id + "/manifest.json",
+                           current_rec_dir_ / "manifest.json",
+                           true);
+    }
+
     completed_recordings_.push_back(current_rec_);
     is_recording_ = false;
 
@@ -228,24 +237,27 @@ std::optional<RecordingSummary> DiskRecorder::active_recording() const {
     if (!is_recording_) {
         return std::nullopt;
     }
-    return current_rec_;
+    auto rec = current_rec_;
+    rec.upload = determine_upload_status(config_.root_dir / rec.recording_id);
+    return rec;
 }
 
 std::vector<RecordingSummary> DiskRecorder::list_recordings() const {
     std::scoped_lock lock(mutex_);
     std::vector<RecordingSummary> list = completed_recordings_;
+    for (auto& r : list) {
+        r.upload = determine_upload_status(config_.root_dir / r.recording_id);
+    }
     if (is_recording_) {
-        list.push_back(current_rec_);
+        auto rec = current_rec_;
+        rec.upload = determine_upload_status(config_.root_dir / rec.recording_id);
+        list.push_back(rec);
     }
     return list;
 }
 
 std::string DiskRecorder::list_recordings_json() const {
-    std::scoped_lock lock(mutex_);
-    std::vector<RecordingSummary> list = completed_recordings_;
-    if (is_recording_) {
-        list.push_back(current_rec_);
-    }
+    std::vector<RecordingSummary> list = list_recordings();
 
     std::ostringstream oss;
     oss << "[\n";
@@ -255,6 +267,36 @@ std::string DiskRecorder::list_recordings_json() const {
     }
     oss << "\n]";
     return oss.str();
+}
+
+std::string DiskRecorder::determine_upload_status(const std::filesystem::path& rec_dir) const {
+    std::error_code ec;
+    if (!std::filesystem::exists(rec_dir, ec)) return "pending";
+
+    bool has_manifest_uploaded = std::filesystem::exists(rec_dir / "manifest.json.uploaded", ec);
+    size_t parts_total = 0;
+    size_t parts_uploaded = 0;
+
+    for (const auto& entry : std::filesystem::directory_iterator(rec_dir, ec)) {
+        if (!entry.is_regular_file()) continue;
+        auto name = entry.path().filename().string();
+        if (name.starts_with("part-") && name.ends_with(".bin")) {
+            parts_total++;
+            std::filesystem::path marker = entry.path();
+            marker += ".uploaded";
+            if (std::filesystem::exists(marker, ec)) {
+                parts_uploaded++;
+            }
+        }
+    }
+
+    if (has_manifest_uploaded && parts_total > 0 && parts_uploaded == parts_total) {
+        return "uploaded";
+    }
+    if (parts_uploaded > 0 || has_manifest_uploaded) {
+        return "partial";
+    }
+    return "pending";
 }
 
 uint64_t DiskRecorder::total_disk_used_bytes() const {
@@ -283,7 +325,8 @@ void DiskRecorder::open_next_chunk_locked() {
 
     std::ostringstream oss;
     oss << "part-" << std::setw(4) << std::setfill('0') << current_part_seq_ << ".bin";
-    std::filesystem::path chunk_path = current_rec_dir_ / oss.str();
+    current_chunk_filename_ = oss.str();
+    std::filesystem::path chunk_path = current_rec_dir_ / current_chunk_filename_;
 
     chunk_file_.open(chunk_path, std::ios::binary | std::ios::trunc);
     chunk_bytes_written_ = 0;
@@ -293,6 +336,12 @@ void DiskRecorder::close_current_chunk_locked() {
     if (chunk_file_.is_open()) {
         chunk_file_.flush();
         chunk_file_.close();
+        if (uploader_ && !current_chunk_filename_.empty() && !current_rec_dir_.empty()) {
+            uploader_->enqueue(current_rec_.recording_id,
+                               current_rec_.recording_id + "/" + current_chunk_filename_,
+                               current_rec_dir_ / current_chunk_filename_,
+                               false);
+        }
     }
     chunk_bytes_written_ = 0;
 }

@@ -37,5 +37,7 @@
 // 5. Web & Serving Subsystem
 #include "peripheral/web/web_server.hpp"
 
-// 6. Storage & Edge Recording Subsystem
+// 6. Storage & Cloud Uplink Subsystem
+#include "peripheral/crypto/sha256.hpp"
 #include "peripheral/storage/disk_recorder.hpp"
+#include "peripheral/storage/cloud_uploader.hpp"

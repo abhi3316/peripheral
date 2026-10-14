@@ -44,11 +44,19 @@ The project follows a subsystem/component-based architecture under `include/peri
   - Gap tracking: Monitors frame sequence jumps, corrupt frames, socket disconnects, and disk full limits (`dropped_by_camera`, `damaged`, `link_down`, `disk_full`).
   - Manifest generation: Writes crash-safe `manifest.json` on start and finalizes on stop.
   - Quota enforcement: Enforces 2 GB disk quota and reports real-time write rate and used bytes.
+- `cloud_uploader.hpp` / `cloud_uploader.cc`: High-performance background cloud storage uplink worker:
+  - Target: Mock cloud object storage on port 7100 (`PUT /v1/servers/peripheral-1/objects/{rec_id}/{chunk_id}`).
+  - Non-blocking FIFO work queue with condition-variable background processing thread.
+  - Zero RAM chunk churn: Streams files from disk in 64 KB buffers with keep-alive socket reuse.
+  - Streaming SHA-256 calculator (`crypto/sha256.hpp`) computes FIPS 180-4 hashes for `X-Content-SHA256` headers.
+  - Dynamic status transitions: `201`/`200` marked uploaded, `409` handled, `503` exponential backoff (100 ms to 3 s).
+  - Restart resilience: Scans `record/` on startup and re-queues un-uploaded chunks.
+  - Real-time telemetry: Powers `/api/state` upload section (`storage`, `lastContactUs`, `backlogObjects`, `backlogBytes`, `oldestPendingUs`).
 
 ### 6. Web & Operator Serving Subsystem (`include/peripheral/web/`, `src/web/`)
 - `web_server.hpp` / `web_server.cc`: Embedded REST API server on port 8080 and static file server for `utils/viewer/dist`.
 - Exposes recording control endpoints: `POST /api/recording/start`, `POST /api/recording/stop`, `GET /api/recordings`.
-- Surfaces active recording state and disk pipeline metrics in `/api/state`.
+- Surfaces active recording state, disk pipeline metrics, and live cloud upload telemetry in `/api/state`.
 
 ### 7. Master Umbrella Headers (`include/peripheral.hpp` & `include/peripheral/peripheral.hpp`)
 - Provides a single, clean generic entry point for consumers: `#include "peripheral/peripheral.hpp"` or `#include <peripheral.hpp>`.
@@ -76,8 +84,9 @@ The project follows a subsystem/component-based architecture under `include/peri
   - `test_frame_pool`: Slab pool sizing, partitioning, intrusive handle ref-counting, and zero-allocation framer tests.
   - `test_time_sync`: PTP 4-timestamp clock offset/delay, 32-bit roll-over, jitter rejection, and 200 Hz pose interpolator unit tests.
   - `test_disk_recorder`: Unit tests for dual-camera chunking, gap detection, and manifest persistence.
+  - `test_cloud_uploader`: Unit tests for streaming SHA-256 calculation, HTTP PUT object upload, and backlog telemetry.
   - `FunctionalCameraTest` (`tests/test_functional_camera.py`): End-to-end Python functional test suite.
-- All tests pass 100% (9/9 tests passing).
+- All tests pass 100% (10/10 tests passing).
 - Verified against `utils/tools` (`npm run camera`): Real-time synchronization active, Δt offset tracking, <300 µs network RTT, 25 fps per-camera frame delivery.
 
 ---

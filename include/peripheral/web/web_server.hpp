@@ -18,6 +18,8 @@
 
 namespace peripheral {
 
+class CloudUploader;
+
 struct WebServerConfig {
     std::string host{"0.0.0.0"};
     uint16_t port{8080};
@@ -61,6 +63,9 @@ public:
     void set_recorder(DiskRecorder* recorder) noexcept {
         recorder_ = recorder;
     }
+    void set_cloud_uploader(CloudUploader* uploader) noexcept {
+        uploader_ = uploader;
+    }
 
     bool start();
     void stop();
@@ -89,6 +94,7 @@ private:
 
     // Storage & Recording management
     DiskRecorder* recorder_{nullptr};
+    CloudUploader* uploader_{nullptr};
 };
 
 } // namespace peripheral

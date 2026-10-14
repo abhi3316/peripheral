@@ -1,4 +1,5 @@
 #include "peripheral/web/web_server.hpp"
+#include "peripheral/storage/cloud_uploader.hpp"
 
 #include <arpa/inet.h>
 #include <chrono>
@@ -924,14 +925,28 @@ std::string WebServer::generate_state_json() {
         << "    \"buffer\": {\"capacityBytes\": 40000000, \"usedBytes\": 1250000, \"highWaterBytes\": 2500000},\n"
         << "    \"disk\": {\"quotaBytes\": " << disk_quota << ", \"usedBytes\": " << disk_used << ", \"writeBytesPerS\": " << static_cast<uint64_t>(disk_write_rate) << "},\n"
         << "    \"memoryBytes\": 45000000\n"
-        << "  },\n"
-        << "  \"upload\": {\n"
-        << "    \"storage\": \"connected\",\n"
-        << "    \"lastContactUs\": " << now_us << ",\n"
-        << "    \"backlogObjects\": 0,\n"
-        << "    \"backlogBytes\": 0,\n"
-        << "    \"oldestPendingUs\": null\n"
         << "  },\n";
+
+    CloudUploadTelemetry upload_telemetry{};
+    if (uploader_) {
+        upload_telemetry = uploader_->get_telemetry();
+    }
+
+    oss << "  \"upload\": {\n"
+        << "    \"storage\": \"" << upload_telemetry.storage << "\",\n";
+    if (upload_telemetry.last_contact_us) {
+        oss << "    \"lastContactUs\": " << *upload_telemetry.last_contact_us << ",\n";
+    } else {
+        oss << "    \"lastContactUs\": null,\n";
+    }
+    oss << "    \"backlogObjects\": " << upload_telemetry.backlog_objects << ",\n"
+        << "    \"backlogBytes\": " << upload_telemetry.backlog_bytes << ",\n";
+    if (upload_telemetry.oldest_pending_us) {
+        oss << "    \"oldestPendingUs\": " << *upload_telemetry.oldest_pending_us << "\n";
+    } else {
+        oss << "    \"oldestPendingUs\": null\n";
+    }
+    oss << "  },\n";
 
     if (recorder_ && recorder_->is_recording()) {
         auto active = recorder_->active_recording();

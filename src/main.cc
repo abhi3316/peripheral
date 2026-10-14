@@ -68,18 +68,30 @@ int main(int argc, char* argv[]) {
               << slots_per_cam << " slots/camera (" << mb_per_cam << " MB/camera, ~"
               << sec_per_cam << "s ring buffer)\n\n";
 
-    // 1. Initialize DiskRecorder & WebServer
+    // 1. Initialize DiskRecorder, CloudUploader & WebServer
     peripheral::DiskRecorderConfig rec_cfg;
     rec_cfg.root_dir = "record";
     rec_cfg.chunk_max_bytes = 10 * 1024 * 1024;
     rec_cfg.disk_quota_bytes = 2000000000ULL;
     peripheral::DiskRecorder disk_recorder(rec_cfg);
 
+    peripheral::CloudUploaderConfig cloud_cfg;
+    cloud_cfg.host = "127.0.0.1";
+    cloud_cfg.port = 7100;
+    cloud_cfg.server_id = "peripheral-1";
+    cloud_cfg.auth_token = "dev-token";
+    cloud_cfg.record_dir = "record";
+    peripheral::CloudUploader cloud_uploader(cloud_cfg);
+    cloud_uploader.start();
+
+    disk_recorder.set_cloud_uploader(&cloud_uploader);
+
     peripheral::WebServerConfig web_cfg;
     web_cfg.port = 8080;
     web_cfg.static_dir = "utils/viewer/dist";
     peripheral::WebServer web_server(web_cfg);
     web_server.set_recorder(&disk_recorder);
+    web_server.set_cloud_uploader(&cloud_uploader);
 
     std::vector<std::unique_ptr<peripheral::CameraSession>> sessions;
 
@@ -169,6 +181,7 @@ int main(int argc, char* argv[]) {
 
     std::cout << "\nShutting down...\n";
     web_server.stop();
+    cloud_uploader.stop();
     for (auto& session : sessions) {
         session->stop();
     }

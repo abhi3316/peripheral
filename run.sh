@@ -30,6 +30,7 @@ echo -e "${BOLD}${CYAN}====================================================${RES
 
 # PIDs of spawned background services
 SIM_PID=""
+STORAGE_PID=""
 SERVER_PID=""
 VIEWER_PID=""
 
@@ -45,6 +46,11 @@ cleanup() {
     if [ -n "$VIEWER_PID" ] && kill -0 "$VIEWER_PID" 2>/dev/null; then
         echo -e "${YELLOW}  Stopping Operator Viewer (PID: $VIEWER_PID)...${RESET}"
         kill -TERM "$VIEWER_PID" 2>/dev/null || true
+    fi
+
+    if [ -n "$STORAGE_PID" ] && kill -0 "$STORAGE_PID" 2>/dev/null; then
+        echo -e "${YELLOW}  Stopping Cloud Storage Simulator (PID: $STORAGE_PID)...${RESET}"
+        kill -TERM "$STORAGE_PID" 2>/dev/null || true
     fi
 
     if [ -n "$SIM_PID" ] && kill -0 "$SIM_PID" 2>/dev/null; then
@@ -78,9 +84,9 @@ fi
 echo -e "${GREEN}  Viewer bundle ready.${RESET}"
 
 # ------------------------------------------------------------------------------
-# 3. Start Official Camera Simulator (if not already running)
+# 3. Start Official Camera Simulator & Cloud Storage (if not already running)
 # ------------------------------------------------------------------------------
-echo -e "${CYAN}[3/4] Starting Official Camera Simulator...${RESET}"
+echo -e "${CYAN}[3/5] Starting Official Camera Simulator & Cloud Storage...${RESET}"
 if lsof -i :7001 >/dev/null 2>&1 || lsof -i :7002 >/dev/null 2>&1; then
     echo -e "${YELLOW}  Camera simulator already active on ports 7001/7002.${RESET}"
 else
@@ -102,10 +108,27 @@ else
     done
 fi
 
+if lsof -i :7100 >/dev/null 2>&1; then
+    echo -e "${YELLOW}  Cloud storage simulator already active on port 7100.${RESET}"
+else
+    (cd utils/tools && npm run storage) &
+    STORAGE_PID=$!
+    
+    echo -n "  Waiting for cloud storage on :7100..."
+    for i in {1..30}; do
+        if lsof -i :7100 >/dev/null 2>&1; then
+            echo -e " ${GREEN}connected!${RESET}"
+            break
+        fi
+        sleep 0.2
+        echo -n "."
+    done
+fi
+
 # ------------------------------------------------------------------------------
 # 4. Start Peripheral Gateway Server
 # ------------------------------------------------------------------------------
-echo -e "${CYAN}[4/4] Starting Peripheral Gateway Server...${RESET}"
+echo -e "${CYAN}[4/5] Starting Peripheral Gateway Server...${RESET}"
 if lsof -i :8080 >/dev/null 2>&1; then
     echo -e "${YELLOW}  Port 8080 in use, stopping existing process...${RESET}"
     kill -9 $(lsof -t -i :8080) 2>/dev/null || true
@@ -157,6 +180,7 @@ echo -e "  ${BOLD}Operator Viewer (Prod):${RESET}     ${CYAN}http://localhost:80
 echo -e "  ${BOLD}Gateway State API:${RESET}          ${CYAN}http://localhost:8080/api/state${RESET}"
 echo -e "  ${BOLD}Camera 0 Simulator Admin:${RESET}   ${CYAN}http://127.0.0.1:7000/admin/stats${RESET}"
 echo -e "  ${BOLD}Camera 1 Simulator Admin:${RESET}   ${CYAN}http://127.0.0.1:7010/admin/stats${RESET}"
+echo -e "  ${BOLD}Cloud Storage Admin:${RESET}        ${CYAN}http://127.0.0.1:7101/admin/objects${RESET}"
 echo -e "  ${BOLD}Recordings Output Directory:${RESET}${CYAN}$ROOT_DIR/record/${RESET}"
 echo -e "${BOLD}${GREEN}================================================================${RESET}"
 echo -e "${YELLOW}Press Ctrl+C to terminate all services cleanly.${RESET}"

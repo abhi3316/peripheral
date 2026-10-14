@@ -13,6 +13,8 @@ services:
       - "7012:7012"   # Camera 1 Video
       - "7000:7000"   # Camera 0 Admin Stats
       - "7010:7010"   # Camera 1 Admin Stats
+      - "7100:7100"   # Cloud Storage API
+      - "7101:7101"   # Cloud Storage Admin Stats
     volumes:
       - ./record:/app/record  # Persist recordings on host machine
     environment:

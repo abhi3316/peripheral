@@ -62,7 +62,8 @@ RUN (cd utils/viewer && npm run build)
 # 7001/7002: Camera 0 (Control / Video)
 # 7011/7012: Camera 1 (Control / Video)
 # 7000/7010: Camera 0 / 1 Simulator Admin Stats
-EXPOSE 8080 5173 7001 7002 7011 7012 7000 7010
+# 7100/7101: Cloud Storage API / Admin Stats
+EXPOSE 8080 5173 7001 7002 7011 7012 7000 7010 7100 7101
 
 # Default entrypoint launches the complete stack
 ENTRYPOINT ["./run.sh"]

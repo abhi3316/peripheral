@@ -39,6 +39,7 @@ add_library(peripheral_socket
     src/camera/camera_session.cc
     src/web/web_server.cc
     src/storage/disk_recorder.cc
+    src/storage/cloud_uploader.cc
 )
 
 target_include_directories(peripheral_socket PUBLIC
@@ -145,6 +146,16 @@ target_link_libraries(test_disk_recorder PRIVATE
 )
 
 add_test(NAME DiskRecorderTest COMMAND test_disk_recorder)
+
+add_executable(test_cloud_uploader
+    tests/test_cloud_uploader.cc
+)
+
+target_link_libraries(test_cloud_uploader PRIVATE
+    peripheral_socket
+)
+
+add_test(NAME CloudUploaderTest COMMAND test_cloud_uploader)
 
 # Python Functional Test with Virtual Camera Simulator
 find_package(Python3 COMPONENTS Interpreter)

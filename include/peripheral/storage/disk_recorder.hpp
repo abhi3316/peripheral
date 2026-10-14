@@ -14,6 +14,8 @@
 
 namespace peripheral {
 
+class CloudUploader;
+
 struct GapRecord {
     std::string camera_id;
     uint32_t boot_id{0};
@@ -72,6 +74,11 @@ public:
     /// Serialized JSON string for /api/recordings
     [[nodiscard]] std::string list_recordings_json() const;
 
+    /// Associate cloud uploader for automatic background streaming of chunks
+    void set_cloud_uploader(CloudUploader* uploader) noexcept {
+        uploader_ = uploader;
+    }
+
     /// Total bytes used by all recordings in the root directory
     [[nodiscard]] uint64_t total_disk_used_bytes() const;
 
@@ -88,13 +95,16 @@ private:
     void close_current_chunk_locked();
     void write_manifest_locked();
     void scan_existing_recordings();
+    std::string determine_upload_status(const std::filesystem::path& rec_dir) const;
 
     DiskRecorderConfig config_;
     mutable std::mutex mutex_;
+    CloudUploader* uploader_{nullptr};
 
     bool is_recording_{false};
     RecordingSummary current_rec_{};
     uint32_t current_part_seq_{0};
+    std::string current_chunk_filename_{};
     std::filesystem::path current_rec_dir_{};
     std::ofstream chunk_file_{};
     uint64_t chunk_bytes_written_{0};
