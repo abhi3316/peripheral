@@ -1,0 +1,25 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: peripheral-gateway
+    ports:
+      - "8080:8080"   # Gateway REST API & Production Operator Viewer
+      - "5173:5173"   # Operator Viewer (Vite Dev Server)
+      - "7001:7001"   # Camera 0 Control
+      - "7002:7002"   # Camera 0 Video
+      - "7011:7011"   # Camera 1 Control
+      - "7012:7012"   # Camera 1 Video
+      - "7000:7000"   # Camera 0 Admin Stats
+      - "7010:7010"   # Camera 1 Admin Stats
+    volumes:
+      - ./record:/app/record  # Persist recordings on host machine
+    environment:
+      - NODE_ENV=production
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'         # Enforce 1 physical CPU core constraint
+          memory: 250M        # Enforce 250 MB RAM constraint
+    restart: unless-stopped

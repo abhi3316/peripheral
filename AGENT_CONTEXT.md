@@ -86,8 +86,17 @@ The project follows a subsystem/component-based architecture under `include/peri
 
 **Rule:** NEVER use `scripts/virtual_camera.py`. ALWAYS utilize the official simulator in `utils/tools`.
 
-### 1. One-Shot Runner (`./run.sh` — Recommended)
-Run the entire stack (simulator, server, viewer) with a single command from root:
+### 1. Docker Container Runner (Zero Host Dependencies)
+Run the entire stack in an isolated Linux environment (Ubuntu 24.04, GCC 14, Node 22) with resource enforcement (1 CPU, 250 MB RAM):
+```bash
+docker compose up --build
+```
+- Completely eliminates host OS and compiler dependencies.
+- Mounts `./record` volume to persist all recordings to host disk.
+- Exposes port 8080 (Gateway/Viewer), 5173 (Dev Viewer), 7000/7010 (Admin), and 7001-7012 (Camera streams).
+
+### 2. Local One-Shot Runner (`./run.sh`)
+Run locally without Docker:
 ```bash
 ./run.sh
 ```
@@ -96,7 +105,7 @@ Run the entire stack (simulator, server, viewer) with a single command from root
 - Passes through any server CLI flags (e.g. `./run.sh --timeout-ms 5000` or `./run.sh --pool-mb 48`).
 - Cleans up all child processes gracefully on `Ctrl+C`.
 
-### 2. Manual Startup Procedure
+### 3. Manual Component Startup
 If running components individually in separate terminals:
 - **Simulator**: `cd utils/tools && npm run camera`
 - **Server**: `./build/peripheral_server`

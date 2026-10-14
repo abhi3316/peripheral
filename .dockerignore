@@ -1,0 +1,9 @@
+build/
+record/
+node_modules/
+utils/viewer/node_modules/
+utils/tools/node_modules/
+.git/
+.DS_Store
+*.pyc
+__pycache__/

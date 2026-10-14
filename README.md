@@ -161,15 +161,36 @@ peripheral/
 
 ## Running the Complete Stack
 
-### Quickstart: One-Shot Runner (`./run.sh`)
-Run everything (simulator, gateway server, and operator viewer) with a single command:
+### Option A: Zero-Dependency Docker Container (Cross-Platform)
+Run the entire stack in an isolated Linux environment (Ubuntu 24.04, GCC 14, Node 22) on any OS (macOS, Linux, Windows) with strict resource limits (1 CPU core, 250 MB RAM):
+
+```bash
+docker compose up --build
+```
+Or run directly with `docker run`:
+```bash
+docker build -t peripheral-gateway .
+docker run --rm -it \
+  --cpus=1.0 -m 250m \
+  -p 8080:8080 -p 5173:5173 \
+  -p 7000:7000 -p 7010:7010 \
+  -p 7001:7001 -p 7002:7002 \
+  -p 7011:7011 -p 7012:7012 \
+  -v "$(pwd)/record:/app/record" \
+  peripheral-gateway
+```
+* **Operator Viewer (Dev)**: `http://localhost:5173/`
+* **Operator Viewer (Production)**: `http://localhost:8080/`
+* **Recordings**: Automatically persisted to `./record/` on your host.
+
+---
+
+### Option B: Local Native One-Shot Runner (`./run.sh`)
+Run locally without Docker on your native machine:
 ```bash
 ./run.sh
 ```
-This builds the C++ binaries, prepares the viewer, spawns all background services, and opens:
-* **Operator Viewer (Dev)**: `http://localhost:5173/`
-* **Operator Viewer (Production)**: `http://localhost:8080/`
-* Press `Ctrl+C` to cleanly stop all services.
+This builds the C++ binaries, prepares the viewer, spawns all background services, and opens the viewer on ports 5173 and 8080. Press `Ctrl+C` to cleanly stop all services.
 
 ---
 
