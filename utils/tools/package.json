@@ -1,0 +1,21 @@
+{
+  "name": "pan-tilt-tools",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "The camera simulator and the cloud storage for the pan-tilt take-home.",
+  "scripts": {
+    "camera": "tsx camera/main.ts",
+    "storage": "tsx storage/main.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "~5.9.0",
+    "vitest": "^3.2.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

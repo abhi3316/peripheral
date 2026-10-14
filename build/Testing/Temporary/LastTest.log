@@ -1,0 +1,183 @@
+Start testing: Oct 13 22:06 ADT
+----------------------------------------------------------
+1/6 Testing: SocketTest
+1/6 Test: SocketTest
+Command: "/Users/achu/Jobs/peripheral/build/test_socket"
+Directory: /Users/achu/Jobs/peripheral/build
+"SocketTest" start time: Oct 13 22:06 ADT
+Output:
+----------------------------------------------------------
+========================================
+Running peripheral::TcpSocket Test Suite
+========================================
+[Test 1] Connection to unreachable port...
+  Passed: Handled connection failure cleanly.
+[Test 2] Loopback data transfer (recv_exact, send_all)...
+  Passed: Loopback transfer verified.
+[Test 3] Thread-safe full-duplex concurrent send/recv...
+  Passed: Concurrently transmitted 2624 bytes and received 2624 bytes.
+All socket tests passed successfully!
+<end of output>
+Test time =   0.81 sec
+----------------------------------------------------------
+Test Passed.
+"SocketTest" end time: Oct 13 22:06 ADT
+"SocketTest" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/6 Testing: StreamCaptureTest
+2/6 Test: StreamCaptureTest
+Command: "/Users/achu/Jobs/peripheral/build/test_stream_capture"
+Directory: /Users/achu/Jobs/peripheral/build
+"StreamCaptureTest" start time: Oct 13 22:06 ADT
+Output:
+----------------------------------------------------------
+========================================
+Running peripheral::StreamCapture Tests 
+========================================
+[Test 1] capture_stream: receiving streaming data in background thread...
+  Passed: Successfully captured 1000 bytes from background stream.
+[Test 2] Multiple camera capture streams running concurrently...
+  Passed: Concurrently captured cam0 (1856 bytes) and cam1 (1920 bytes).
+All StreamCapture tests passed successfully!
+<end of output>
+Test time =   0.44 sec
+----------------------------------------------------------
+Test Passed.
+"StreamCaptureTest" end time: Oct 13 22:06 ADT
+"StreamCaptureTest" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/6 Testing: StreamBufferTest
+3/6 Test: StreamBufferTest
+Command: "/Users/achu/Jobs/peripheral/build/test_stream_buffer"
+Directory: /Users/achu/Jobs/peripheral/build
+"StreamBufferTest" start time: Oct 13 22:06 ADT
+Output:
+----------------------------------------------------------
+========================================
+Running peripheral::StreamBuffer Tests  
+========================================
+[Test 1] StreamBuffer: basic write, read, and consume...
+  Passed: Basic write/read/consume verified.
+[Test 2] StreamBuffer: auto-compaction when tail space is low...
+  Passed: Auto-compaction verified without data corruption.
+[Test 3] StreamBuffer: find_marker with garbage resilience...
+  Passed: Marker search verified across 5,000 garbage bytes.
+[Test 4] StreamBuffer: concurrent Producer (Socket), Consumer (Cloud/Storage), and Peeker (Web Viewer)...
+  Passed: Concurrently produced 512000 bytes, consumed 512000 bytes by cloud uploader, and peeked 10496 bytes by Web Viewer.
+All StreamBuffer tests passed successfully!
+<end of output>
+Test time =   0.26 sec
+----------------------------------------------------------
+Test Passed.
+"StreamBufferTest" end time: Oct 13 22:06 ADT
+"StreamBufferTest" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/6 Testing: CameraSessionTest
+4/6 Test: CameraSessionTest
+Command: "/Users/achu/Jobs/peripheral/build/test_camera_session"
+Directory: /Users/achu/Jobs/peripheral/build
+"CameraSessionTest" start time: Oct 13 22:06 ADT
+Output:
+----------------------------------------------------------
+========================================
+Running peripheral::CameraSession Tests 
+========================================
+[Test 1] CameraSession: lifecycle and session-level mutex synchronization...
+  Passed: CameraSession successfully coordinated session lifecycle and dispatched 20 command bytes safely.
+All CameraSession tests passed successfully!
+<end of output>
+Test time =   0.41 sec
+----------------------------------------------------------
+Test Passed.
+"CameraSessionTest" end time: Oct 13 22:06 ADT
+"CameraSessionTest" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/6 Testing: FramersTest
+5/6 Test: FramersTest
+Command: "/Users/achu/Jobs/peripheral/build/test_framers"
+Directory: /Users/achu/Jobs/peripheral/build
+"FramersTest" start time: Oct 13 22:06 ADT
+Output:
+----------------------------------------------------------
+========================================
+Running peripheral::Framers Unit Tests  
+========================================
+[Test 1] VideoFramer: Normal valid frame parsing and truth stamp extraction...
+  Passed: 1 valid frame parsed with correct truth stamp.
+[Test 2] VideoFramer: Corrupt payload detection (Corrupt fate)...
+  Passed: Frame with damaged pixels classified as Corrupt fate.
+[Test 3] VideoFramer: Automatic 5,000-byte garbage recovery...
+  Passed: Skipped 5,000 garbage bytes and synchronized to VFRM frame.
+[Test 4] ControlFramer: Parsing HELLO, POSE, TIME_RESP, ACK and outgoing serialization...
+  Passed: Control messages parsed and serialized accurately.
+All Framers unit tests passed successfully!
+<end of output>
+Test time =   0.22 sec
+----------------------------------------------------------
+Test Passed.
+"FramersTest" end time: Oct 13 22:06 ADT
+"FramersTest" time elapsed: 00:00:00
+----------------------------------------------------------
+
+6/6 Testing: FunctionalCameraTest
+6/6 Test: FunctionalCameraTest
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.13/bin/python3.13" "/Users/achu/Jobs/peripheral/tests/test_functional_camera.py"
+Directory: /Users/achu/Jobs/peripheral/build
+"FunctionalCameraTest" start time: Oct 13 22:06 ADT
+Output:
+----------------------------------------------------------
+==========================================================
+ Starting Functional Ingress Test with Virtual Cameras    
+==========================================================
+
+--- Testing cam0 (Control: 7001, Video: 7002, Admin: 7000) ---
+[cam0] Control socket connected.
+[cam0] Received HELLO from camera ID: 'cam0'
+[cam0] Received POSE: Pan=14.9°, Tilt=34.4°, Time=422166µs
+[cam0] TIME_RESP received: echo matched, camera t2=423494µs, t3=423742µs
+[cam0] ACK received for cmd_id 42: result=0 (Accepted), duplicate=0
+[cam0] Duplicate ACK received for cmd_id 42: duplicate=1 (100-command ring buffer verified)
+[cam0] Video socket connected.
+[cam0] Frame #1 verified: 1000x625, CRC OK, TruthPan=14.88°, TruthTilt=34.36°, SamplePixel=170 (BLUE shade)
+[cam0] Frame #2 verified: 1000x625, CRC OK, TruthPan=15.19°, TruthTilt=34.51°, SamplePixel=170 (BLUE shade)
+[cam0] Frame #3 verified: 1000x625, CRC OK, TruthPan=15.59°, TruthTilt=34.71°, SamplePixel=174 (BLUE shade)
+[cam0] Admin API /admin/stats verified: cameraId='cam0', fps=25, framesSent=4
+[cam0] Admin API /admin/truth verified: recorded 5 truth frames
+[cam0] Admin API /admin/fault successfully injected 1 corrupt frame fault
+[cam0] Admin API /admin/play successfully stopped automated motion
+[cam0] All functional checks and Admin REST API tests passed successfully!
+
+--- Testing cam1 (Control: 7011, Video: 7012, Admin: 7010) ---
+[cam1] Control socket connected.
+[cam1] Received HELLO from camera ID: 'cam1'
+[cam1] Received POSE: Pan=22.0°, Tilt=33.5°, Time=637392µs
+[cam1] TIME_RESP received: echo matched, camera t2=638639µs, t3=638720µs
+[cam1] ACK received for cmd_id 42: result=0 (Accepted), duplicate=0
+[cam1] Duplicate ACK received for cmd_id 42: duplicate=1 (100-command ring buffer verified)
+[cam1] Video socket connected.
+[cam1] Frame #1 verified: 1000x625, CRC OK, TruthPan=22.00°, TruthTilt=33.55°, SamplePixel=183 (GREEN shade)
+[cam1] Frame #2 verified: 1000x625, CRC OK, TruthPan=22.30°, TruthTilt=33.70°, SamplePixel=183 (GREEN shade)
+[cam1] Frame #3 verified: 1000x625, CRC OK, TruthPan=22.70°, TruthTilt=33.90°, SamplePixel=179 (GREEN shade)
+[cam1] Admin API /admin/stats verified: cameraId='cam1', fps=25, framesSent=3
+[cam1] Admin API /admin/truth verified: recorded 3 truth frames
+[cam1] Admin API /admin/fault successfully injected 1 corrupt frame fault
+[cam1] Admin API /admin/play successfully stopped automated motion
+[cam1] All functional checks and Admin REST API tests passed successfully!
+
+==========================================================
+ FUNCTIONAL TEST RESULT: 100% PASSED                      
+ Both Virtual Cameras streamed valid VFRM & PTCL frames!  
+==========================================================
+<end of output>
+Test time =   0.92 sec
+----------------------------------------------------------
+Test Passed.
+"FunctionalCameraTest" end time: Oct 13 22:06 ADT
+"FunctionalCameraTest" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Oct 13 22:06 ADT

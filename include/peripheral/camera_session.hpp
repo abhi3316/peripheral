@@ -1,0 +1,117 @@
+#pragma once
+
+#include "camera_endpoint.hpp"
+#include "control_framer.hpp"
+#include "protocol.hpp"
+#include "socket.hpp"
+#include "stream_capture.hpp"
+#include "video_frame.hpp"
+#include "video_framer.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <span>
+#include <string>
+#include <string_view>
+
+namespace peripheral {
+
+struct CameraSessionConfig {
+    StreamCaptureConfig video_config{};
+    StreamCaptureConfig control_config{};
+
+    static CameraSessionConfig default_config() {
+        CameraSessionConfig cfg;
+        // Video: 2 MB socket receive buffer
+        cfg.video_config.socket_config.rcv_buf_bytes = 2 * 1024 * 1024;
+        cfg.video_config.read_buffer_size = 128 * 1024;
+        // Control: TCP_NODELAY for low latency
+        cfg.control_config.socket_config.tcp_nodelay = true;
+        cfg.control_config.read_buffer_size = 4 * 1024;
+        return cfg;
+    }
+};
+
+using FrameHandler = std::function<void(const VideoFrame& frame)>;
+using PoseHandler = std::function<void(const PosePayload& pose)>;
+using StatusHandler = std::function<void(const StatusPayload& status)>;
+using HelloHandler = std::function<void(const HelloPayload& hello)>;
+
+/**
+ * @brief Domain entity managing capture, framing, and command control for a camera rig.
+ *
+ * Coordinates:
+ *  - Ingress Video Framer (VFRM parsing, CRC checks, garbage recovery)
+ *  - Ingress Control Framer (PTCL parsing, POSE, STATUS, HELLO)
+ *  - Outgoing command generation (TIME_REQ, CMD jog/home)
+ *  - Session-level mutex thread synchronization
+ */
+class CameraSession {
+public:
+    explicit CameraSession(CameraEndpoint endpoint, CameraSessionConfig config = CameraSessionConfig::default_config());
+    ~CameraSession();
+
+    CameraSession(const CameraSession&) = delete;
+    CameraSession& operator=(const CameraSession&) = delete;
+
+    // Start background receiver & framer threads
+    bool start();
+
+    // Gracefully stop all streams
+    void stop();
+
+    // Outgoing control commands
+    SocketStatus send_time_req(uint64_t echo_timestamp);
+    SocketStatus send_jog(float pan_speed, float tilt_speed);
+    SocketStatus send_home();
+    SocketStatus send_goto(float pan_deg, float tilt_deg);
+    SocketStatus send_stop();
+    SocketStatus send_control_raw(std::span<const uint8_t> control_msg);
+
+    // Handlers for parsed frames and telemetry
+    void set_frame_handler(FrameHandler handler);
+    void set_pose_handler(PoseHandler handler);
+    void set_status_handler(StatusHandler handler);
+    void set_hello_handler(HelloHandler handler);
+    void set_state_callback(StateCallback cb);
+
+    // Queries
+    [[nodiscard]] std::string_view name() const noexcept;
+    [[nodiscard]] const CameraEndpoint& endpoint() const noexcept;
+    [[nodiscard]] bool is_video_connected() const noexcept;
+    [[nodiscard]] bool is_control_connected() const noexcept;
+    [[nodiscard]] bool is_running() const noexcept;
+
+    // Framer statistics
+    [[nodiscard]] uint64_t valid_frames() const noexcept;
+    [[nodiscard]] uint64_t corrupt_frames() const noexcept;
+    [[nodiscard]] uint64_t dropped_frames() const noexcept;
+    [[nodiscard]] uint64_t garbage_bytes_discarded() const noexcept;
+
+private:
+    CameraEndpoint endpoint_;
+    CameraSessionConfig config_;
+
+    mutable std::mutex session_mutex_;
+
+    std::unique_ptr<StreamCapture> video_stream_;
+    std::unique_ptr<StreamCapture> control_stream_;
+
+    VideoFramer video_framer_;
+    ControlFramer control_framer_;
+
+    FrameHandler frame_handler_;
+    PoseHandler pose_handler_;
+    StatusHandler status_handler_;
+    HelloHandler hello_handler_;
+    StateCallback on_state_;
+
+    std::atomic<bool> running_{false};
+    uint32_t cmd_seq_{0};
+    uint32_t msg_seq_{0};
+};
+
+} // namespace peripheral

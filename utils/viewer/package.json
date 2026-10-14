@@ -1,0 +1,27 @@
+{
+  "name": "pan-tilt-viewer",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "The operator's viewer for the pan-tilt take-home: a React + TypeScript page. Connect it to your server in src/server/useServer.ts.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json && vite build",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "~5.9.0",
+    "vite": "^7.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

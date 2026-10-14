@@ -1,0 +1,7 @@
+SocketTest 14 0.0581871
+StreamCaptureTest 14 0.0316498
+StreamBufferTest 11 0.0234651
+CameraSessionTest 8 0.0510579
+FunctionalCameraTest 3 0.306055
+FramersTest 1 0.218571
+---

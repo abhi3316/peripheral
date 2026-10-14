@@ -1,0 +1,12 @@
+server_us,event
+1000000000,"server connected to both ports; camera playing the recorded motion"
+1004000000,"server stops reading for 200 ms; the camera keeps 3 frames and drops the rest"
+1004999751,"the camera clock wraps from 4294967295 to 0"
+1007000000,"the next 3 frames have a wrong payload_crc32"
+1009000000,"5000 garbage bytes before the next frame; they contain one false VFRM start marker"
+1011000000,"video connection closes in the middle of the next frame; the camera refuses video until +12.00 s"
+1012050000,"server reconnects to the video port"
+1014000000,"camera restarts: both connections close; boot 4, clock restarts at 500000000, not homed"
+1015100000,"server reconnects to both ports"
+1016000000,"server sends CMD home (cmd_id 1001); the camera homes at 30°/s"
+1020000000,"end of the capture"
