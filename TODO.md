@@ -19,9 +19,9 @@ This document outlines the architectural status of the **Peripheral Camera Gatew
 | **Official Operator React Viewer** | **Complete** | Full integration with `utils/viewer` on port 5173 and bundled at 8080 |
 | **One-Shot Runner Script** | **Complete** | `./run.sh` orchestrates simulator, server, and viewer with graceful `Ctrl+C` teardown |
 | **Docker Containerization** | **Complete** | `Dockerfile` & `docker-compose.yml` on Ubuntu 24.04 (GCC 14, C++26, Node 22, 1 CPU / 250 MB RAM) |
-| **Unit & Functional Test Suite** | **Complete** | 10/10 CTest unit & functional test suites pass 100% |
+| **Unit & Functional Test Suite** | **Complete** | 11/11 CTest unit & functional test suites pass 100% |
 | **Cloud Storage Uplink Worker** | **Complete** | Background worker streaming completed chunks to port 7100 with SHA-256 and retries |
-| **Offline Capture Dataset Validation** | **Pending** | Replay harness against `utils/data/capture/` verifying sequence, pose, and fate matching |
+| **Offline Capture Dataset Validation** | **Complete** | Replay harness against `utils/data/capture/` verifying sequence, pose, and fate matching |
 | **Live Alarms & Event Log Streaming** | **Pending** | Populating `alarms` and `events` arrays in `/api/state` for viewer alerts |
 | **Automatic Local Disk Pruning** | **Pending** | Pruning confirmed uploaded chunks when approaching the 2 GB disk quota |
 | **GitHub Actions CI/CD Pipeline** | **Complete** | Automated multi-platform builds, unit tests, and artifact uploads on push / manual dispatch |
@@ -66,6 +66,7 @@ This document outlines the architectural status of the **Peripheral Camera Gatew
 ---
 
 ### 2. Offline Capture Dataset Validation Suite (`tests/test_offline_capture.cc`)
+**Status**: **COMPLETE** (Implemented in `tests/test_offline_capture.cc`, registered as `OfflineCaptureTest` in CTest with 11/11 suites passing).
 **Objective**: Validate protocol parsing, clock recovery, and pose interpolation against the 20-second historical capture in `utils/data/capture/`.
 
 - [x] **Replay Harness**:
