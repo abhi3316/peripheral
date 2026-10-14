@@ -37,6 +37,7 @@ TABLE OF CONTENTS
    5.2 Native Compilation & Test Execution
    5.3 Complete One-Shot Stack Runner (./run.sh)
    5.4 Docker Deployment Under Strict Hardware Constraints (1 CPU, 250 MB RAM)
+       5.4.1 Running Pre-Built Docker Image from GitHub Actions (.tar / .tar.gz)
    5.5 Automated CI/CD & Multi-Platform Release Pipeline
 6. APPENDIX: BENCHMARKS & VERIFIED OPERATING METRICS
 
@@ -123,10 +124,21 @@ System RAM Budget Allocation:
   TCP Socket Buffers (4 streams * 2 MB)       8.0 MB             3.2%
   Server Binary & Thread Stacks               6.0 MB             2.4%
   Embedded Web Server & Static UI Cache       4.0 MB             1.6%
+    ├── Single-Slot Preview Buffer (2 cams)    0.13 MB           0.05%
+    ├── Compiled React UI Assets (Dist)        3.20 MB           1.28%
+    └── HTTP Client Sockets & Parse Buffers    0.67 MB           0.27%
   Kernel Page Cache & Dirty Write Buffers   150.0 MB            60.0%
   Safety Headroom                            41.3 MB            16.5%
   ---------------------------------------------------------------------
   TOTAL CEILING                             250.0 MB           100.0%
+
+Web Preview Buffer Architectural Sizing:
+  Under full 250 Mb/s (31.25 MB/s) ingress, an unbounded multi-frame web queue
+  would exhaust the 250 MB RAM budget in <8 seconds. To guarantee deterministic
+  safety, the Web Server maintains exactly one 64 KB slot per camera (320x200
+  greyscale, 128 KB combined across cam0 and cam1). Incoming frames overwrite
+  this single slot in-place; slow or disconnected browser clients drop unread
+  previews with zero memory accumulation.
 
 2.3 Why Exactly 32 Slots per Camera?
 -------------------------------------
@@ -1040,6 +1052,10 @@ Files: include/peripheral/web/web_server.hpp, src/web/web_server.cc
 - Embedded Web Server: Fast, zero-overhead HTTP server listening on port 8080.
 - Real-time Downsampling: Dynamically scales 1000x625 raw frames to 320x200
   greyscale in < 0.1 ms for smooth, low-latency browser preview.
+- Single-Slot Overwrite Preview Buffer: Maintains exactly 1 preview slot per
+  camera (64 KB each = 128 KB total across cam0/cam1). Overwrites in place with
+  zero multi-frame queue accumulation, eliminating memory bloat when browser
+  tabs disconnect, stall, or poll slowly.
 - REST Endpoints:
   * GET /api/state: Comprehensive system state, cameras, pipeline, upload telemetry.
   * GET /api/preview: Real-time camera preview frame with attached pose.
@@ -1139,33 +1155,106 @@ To mirror the real production system, the project provides a multi-container
 Docker Compose architecture (docker-compose.yml) that strictly enforces the
 assignment limits using Linux cgroups v2.
 
-Architecture:
+Architecture & Services:
 - Container 1 (peripheral-simulator):
   Runs camera and cloud storage simulators with network binding on 0.0.0.0.
+  Exposes ports 7001-7002 (cam0), 7011-7012 (cam1), 7000/7010 (admin), and 7100 (cloud).
 - Container 2 (peripheral-gateway):
   Runs the C++26 peripheral_server under hard cgroup resource limits:
   * cpus: 1.0 (enforces 1 physical core ceiling).
   * mem_limit: 250m (enforces 250 MB physical RAM limit).
   * memswap_limit: 250m (swap disabled to guarantee physical RAM compliance).
+  * Mounts host directory ./record to /app/record for zero-loss chunk persistence.
 
-Step 1: Build and launch the constrained environment:
-  docker compose up -d --build
+Step-by-Step Instructions to Run Docker on Your Computer:
 
-Step 2: Inspect real-time resource usage:
+Prerequisite: Ensure Docker Desktop is installed and running on your system:
+  docker --version
+  docker info
+
+Step 1: Build and Launch the Stack
+Choose one of the two execution modes:
+
+- Mode A: Interactive Foreground (Recommended for testing):
+  Streams live logs from both the camera simulator and gateway directly to your terminal.
+  Press Ctrl+C to cleanly stop all containers.
+    docker compose up --build
+
+- Mode B: Background Daemon (Detached mode):
+  Builds and starts the containers in the background, freeing your terminal.
+    docker compose up -d --build
+
+Step 2: Verify Running Containers & Resource Limits
+Check that both containers are healthy and running:
+  docker compose ps
+
+Verify that the 1 CPU core and 250 MB RAM constraints are enforced:
   docker stats --no-stream
 
-Verified Production Output:
+Verified Production Metrics Output:
   CONTAINER ID   NAME                 CPU %   MEM USAGE / LIMIT   MEM %    NET I/O
   774b0e9ca391   peripheral-gateway   25.9%   46.7MiB / 250MiB    18.7%    834MB / 655kB
   2a1fba2208e6   peripheral-simulator 16.3%   212MiB / 3.8GiB      5.4%    634kB / 802MB
 
-Step 3: Access the containerized gateway:
-- Web Dashboard: http://localhost:8080
-- Live Alarms & Events: http://localhost:8080/events
-- View Container Logs:
-  docker logs -f peripheral-gateway
+Step 3: Access the Web Dashboard & Endpoints
+Open your web browser and navigate to:
+- Main Operator UI (Viewer): http://localhost:8080
+- Dedicated Live Alarms & Logs: http://localhost:8080/events
+- Camera 0 Simulator Admin: http://localhost:7000/admin/stats
+- Camera 1 Simulator Admin: http://localhost:7010/admin/stats
+- Cloud Storage Admin: http://localhost:7101/admin/objects
 
-Step 4: Stop the deployment:
+Step 4: Monitor Real-Time Logs
+To follow live logs from the gateway:
+  docker compose logs -f gateway
+
+To follow live logs from the camera simulator:
+  docker compose logs -f simulator
+
+Step 5: Stop the Docker Stack
+When you are done, stop all containers:
+- If running in foreground (Mode A): Press Ctrl+C in that terminal.
+- If running in background (Mode B) or to tear down completely:
+    docker compose down
+
+5.4.1 Running Pre-Built Docker Image from GitHub Actions (.tar / .tar.gz)
+------------------------------------------------------------------------
+When downloading the pre-built container image artifact generated by GitHub Actions
+(peripheral-gateway-docker.tar or peripheral-gateway-docker.tar.gz), you do not need
+to compile C++ code or rebuild the Docker container locally.
+
+Step 1: Load the image into your local Docker daemon:
+  # If downloaded as an uncompressed .tar file:
+  docker load -i peripheral-gateway-docker.tar
+
+  # Or if downloaded as a gzipped .tar.gz file:
+  docker load -i peripheral-gateway-docker.tar.gz
+
+Expected Output:
+  Loaded image: peripheral-gateway:latest
+
+Step 2: Verify the loaded image:
+  docker images | grep peripheral-gateway
+
+Step 3: Launch the Stack with the Pre-Built Image
+Since docker-compose.yml targets peripheral-gateway:latest, launch without --build:
+  # Run in interactive foreground mode:
+  docker compose up
+
+  # Or run in detached background mode:
+  docker compose up -d
+
+Alternatively, run the gateway container directly:
+  docker run --rm -it \
+    --cpus=1.0 -m 250m \
+    -p 8080:8080 \
+    -v "$(pwd)/record:/app/record" \
+    peripheral-gateway:latest
+
+Step 4: Access the Operator UI:
+  Navigate to: http://localhost:8080
+
+Step 5: Stop the Deployment:
   docker compose down
 
 5.5 Automated CI/CD & Multi-Platform Release Pipeline

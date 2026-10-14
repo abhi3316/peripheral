@@ -1,5 +1,7 @@
+AGENT_CONTEXT.md
 build/
 record/
+TODO*
 node_modules/
 .DS_Store
 *.pyc

@@ -164,28 +164,85 @@ peripheral/
 ### Option A: Zero-Dependency Docker Container (Cross-Platform)
 Run the entire stack in an isolated Linux environment (Ubuntu 24.04, GCC 14, Node 22) on any OS (macOS, Linux, Windows) with strict resource limits (1 CPU core, 250 MB RAM):
 
+#### Step 1: Ensure Docker Desktop is Running
+Make sure Docker Desktop is launched on your computer:
 ```bash
-docker compose up --build
+docker --version
+docker info
 ```
-Or run directly with `docker run`:
+
+#### Step 2: Build and Launch the Stack
+- **Interactive Foreground (Live Logs)**:
+  ```bash
+  docker compose up --build
+  ```
+  *(Press `Ctrl+C` in this terminal to stop all containers).*
+
+- **Background Daemon (Detached Mode)**:
+  ```bash
+  docker compose up -d --build
+  ```
+
+#### Step 3: Verify Status & Resource Constraints
+Verify that both containers (`peripheral-gateway` and `peripheral-simulator`) are running:
 ```bash
-docker build -t peripheral-gateway .
-docker run --rm -it \
-  --cpus=1.0 -m 250m \
-  -p 8080:8080 -p 5173:5173 \
-  -p 7000:7000 -p 7010:7010 \
-  -p 7001:7001 -p 7002:7002 \
-  -p 7011:7011 -p 7012:7012 \
-  -v "$(pwd)/record:/app/record" \
-  peripheral-gateway
+docker compose ps
 ```
-* **Operator Viewer (Dev)**: `http://localhost:5173/`
-* **Operator Viewer (Production)**: `http://localhost:8080/`
-* **Recordings**: Automatically persisted to `./record/` on your host.
+Inspect resource compliance (1 CPU core, 250 MB RAM limit):
+```bash
+docker stats --no-stream
+```
+
+#### Step 4: Access the Operator UI & Endpoints
+* **Operator Web Viewer (Production)**: [http://localhost:8080/](http://localhost:8080/)
+* **Live Streaming Alarms & Logs**: [http://localhost:8080/events](http://localhost:8080/events)
+* **Camera 0 Admin Stats**: [http://localhost:7000/admin/stats](http://localhost:7000/admin/stats)
+* **Camera 1 Admin Stats**: [http://localhost:7010/admin/stats](http://localhost:7010/admin/stats)
+* **Cloud Storage Admin**: [http://localhost:7101/admin/objects](http://localhost:7101/admin/objects)
+* **Recordings**: Automatically persisted to `./record/` on your host machine.
+
+#### Step 5: Follow Live Logs
+```bash
+# View Gateway logs
+docker compose logs -f gateway
+
+# View Camera Simulator logs
+docker compose logs -f simulator
+```
+
+#### Step 6: Stop the Stack
+```bash
+docker compose down
+```
 
 ---
 
-### Option B: Local Native One-Shot Runner (`./run.sh`)
+### Option B: Running Pre-Built Docker Image from GitHub Actions (`.tar` / `.tar.gz`)
+If you downloaded the pre-compiled container image artifact (`peripheral-gateway-docker.tar` or `peripheral-gateway-docker.tar.gz`) from GitHub Actions, you do not need to compile code or run a local Docker build:
+
+1. **Load image into Docker**:
+   ```bash
+   # For uncompressed .tar:
+   docker load -i peripheral-gateway-docker.tar
+
+   # For gzipped .tar.gz:
+   docker load -i peripheral-gateway-docker.tar.gz
+   ```
+2. **Verify loaded image**:
+   ```bash
+   docker images | grep peripheral-gateway
+   ```
+3. **Launch with Docker Compose** (runs immediately without building):
+   ```bash
+   docker compose up
+   ```
+   *(Or in detached background mode: `docker compose up -d`)*
+4. **Access Web Viewer**: Open [http://localhost:8080/](http://localhost:8080/)
+5. **Stop**: `docker compose down`
+
+---
+
+### Option C: Local Native One-Shot Runner (`./run.sh`)
 Run locally without Docker on your native machine:
 ```bash
 ./run.sh

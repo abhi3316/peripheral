@@ -62,6 +62,7 @@ void test_auto_compaction() {
 
     // Request writable span of 35 KB (triggers compaction)
     auto wspan = buf.writable_span(35 * 1024);
+    (void)wspan;
     assert(wspan.size() >= 35 * 1024);
 
     auto readable = buf.readable_span();
@@ -100,6 +101,7 @@ void test_marker_search() {
     uint8_t ptcl_bytes[4] = {'P', 'T', 'C', 'L'};
     buf.append(std::span<const uint8_t>(ptcl_bytes, 4));
     auto found_ptcl = buf.find_marker(PTCL_MARKER);
+    (void)found_ptcl;
     assert(found_ptcl.has_value());
     assert(found_ptcl.value() == 4);
 
@@ -170,6 +172,53 @@ void test_concurrent_producer_consumers() {
               << bytes_peeked_by_viewer.load() << " bytes by Web Viewer.\n";
 }
 
+void test_buffer_exhaustion_and_backpressure() {
+    std::cout << "[Test 5] StreamBuffer: capacity exhaustion, empty writable span, and recovery...\n";
+
+    constexpr size_t BUF_CAP = 64 * 1024; // 64 KB capacity
+    peripheral::StreamBuffer buffer(BUF_CAP);
+
+    assert(buffer.capacity() == BUF_CAP);
+    assert(buffer.writable_bytes() == BUF_CAP);
+
+    // 1. Fill buffer to 100% capacity
+    std::vector<uint8_t> full_chunk(BUF_CAP, 0x77);
+    bool ok = buffer.append(full_chunk);
+    (void)ok;
+    assert(ok && "Initial fill should succeed");
+    assert(buffer.readable_bytes() == BUF_CAP);
+    assert(buffer.writable_bytes() == 0);
+
+    // 2. Consequence: Attempting to append more data when full MUST return false (reject data)
+    std::vector<uint8_t> extra_chunk(1024, 0x88);
+    bool overflow_ok = buffer.append(extra_chunk);
+    (void)overflow_ok;
+    assert(!overflow_ok && "Append must fail when StreamBuffer has no available capacity");
+
+    // 3. Consequence: Direct socket ingress writable_span provider returns empty span (0 bytes)
+    //    This signals StreamCapture to apply TCP backpressure (skip recv, sleep 1ms)
+    auto target_span = buffer.writable_span(1024);
+    (void)target_span;
+    assert(target_span.empty() && "Writable span must be empty when buffer is full");
+    assert(target_span.size() == 0);
+
+    // 4. Consequence & Recovery: Downstream consumer consumes 16 KB
+    buffer.consume(16 * 1024);
+    assert(buffer.readable_bytes() == 48 * 1024);
+
+    // 5. Verify writable space is now available again via automatic compaction
+    auto recovered_span = buffer.writable_span(16 * 1024);
+    (void)recovered_span;
+    assert(recovered_span.size() >= 16 * 1024);
+
+    // 6. Verify append now succeeds
+    bool append_after_consume = buffer.append(extra_chunk);
+    (void)append_after_consume;
+    assert(append_after_consume && "Append must succeed once downstream consumer drains buffer");
+
+    std::cout << "  Passed: Buffer capacity exhaustion, zero writable span backpressure, and consumer recovery verified.\n";
+}
+
 int main() {
     std::cout << "========================================\n";
     std::cout << "Running peripheral::StreamBuffer Tests  \n";
@@ -179,7 +228,9 @@ int main() {
     test_auto_compaction();
     test_marker_search();
     test_concurrent_producer_consumers();
+    test_buffer_exhaustion_and_backpressure();
 
     std::cout << "All StreamBuffer tests passed successfully!\n";
     return 0;
 }
+

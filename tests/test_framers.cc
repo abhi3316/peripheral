@@ -226,6 +226,7 @@ void test_control_framer() {
     framer.push_data(ack_wire);
 
     size_t count = framer.parse_available();
+    (void)count;
     assert(count == 3);
     assert(hello_seen);
     assert(pose_seen);
@@ -241,6 +242,86 @@ void test_control_framer() {
     std::cout << "  Passed: Control messages parsed and serialized accurately.\n";
 }
 
+void test_control_framer_garbage_and_bad_crc() {
+    std::cout << "[Test 5] ControlFramer: Discarding socket noise, bad markers, and corrupt CRC packets...\n";
+
+    peripheral::ControlFramer framer;
+    size_t valid_pose_received = 0;
+    framer.set_pose_callback([&valid_pose_received](const peripheral::PosePayload& p) {
+        assert(p.pan_counts == 300);
+        valid_pose_received++;
+    });
+
+    std::vector<uint8_t> noisy_stream;
+
+    // 1. Injected 2,000 bytes of arbitrary socket noise
+    std::mt19937 rng(42);
+    for (size_t i = 0; i < 2000; ++i) {
+        noisy_stream.push_back(static_cast<uint8_t>(rng() & 0xFF));
+    }
+
+    // 2. Corrupted Packet: Invalid Version
+    peripheral::ControlHeader bad_ver_hdr{};
+    bad_ver_hdr.start_marker = peripheral::PTCL_START_MARKER;
+    bad_ver_hdr.version = 99; // Invalid version
+    bad_ver_hdr.type = static_cast<uint8_t>(peripheral::ControlMsgType::Pose);
+    bad_ver_hdr.payload_bytes = sizeof(peripheral::PosePayload);
+    peripheral::PosePayload dummy_payload{};
+    noisy_stream.insert(noisy_stream.end(), reinterpret_cast<const uint8_t*>(&bad_ver_hdr),
+                        reinterpret_cast<const uint8_t*>(&bad_ver_hdr) + sizeof(bad_ver_hdr));
+    noisy_stream.insert(noisy_stream.end(), reinterpret_cast<const uint8_t*>(&dummy_payload),
+                        reinterpret_cast<const uint8_t*>(&dummy_payload) + sizeof(dummy_payload));
+
+    // 3. Corrupted Packet: Damaged CRC Checksum
+    peripheral::ControlHeader bad_crc_hdr{};
+    bad_crc_hdr.start_marker = peripheral::PTCL_START_MARKER;
+    bad_crc_hdr.version = 1;
+    bad_crc_hdr.type = static_cast<uint8_t>(peripheral::ControlMsgType::Pose);
+    bad_crc_hdr.payload_bytes = sizeof(peripheral::PosePayload);
+    bad_crc_hdr.crc32 = 0xDEADBEEF; // Corrupt CRC
+    noisy_stream.insert(noisy_stream.end(), reinterpret_cast<const uint8_t*>(&bad_crc_hdr),
+                        reinterpret_cast<const uint8_t*>(&bad_crc_hdr) + sizeof(bad_crc_hdr));
+    noisy_stream.insert(noisy_stream.end(), reinterpret_cast<const uint8_t*>(&dummy_payload),
+                        reinterpret_cast<const uint8_t*>(&dummy_payload) + sizeof(dummy_payload));
+
+    // 4. Trailing socket noise
+    for (size_t i = 0; i < 500; ++i) {
+        noisy_stream.push_back(static_cast<uint8_t>(rng() & 0xFF));
+    }
+
+    // 5. Valid POSE Packet
+    peripheral::ControlHeader valid_hdr{};
+    valid_hdr.start_marker = peripheral::PTCL_START_MARKER;
+    valid_hdr.version = 1;
+    valid_hdr.type = static_cast<uint8_t>(peripheral::ControlMsgType::Pose);
+    valid_hdr.payload_bytes = sizeof(peripheral::PosePayload);
+    valid_hdr.msg_seq = 42;
+
+    peripheral::PosePayload valid_payload{};
+    valid_payload.counter = 123456;
+    valid_payload.pan_counts = 300;
+    valid_payload.tilt_counts = 100;
+    valid_payload.homed = 1;
+
+    uint8_t hdr12[12];
+    std::memcpy(hdr12, &valid_hdr, 12);
+    uint32_t c = peripheral::crc32(std::span<const uint8_t>(hdr12, 12));
+    c = peripheral::crc32(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&valid_payload), sizeof(valid_payload)), c);
+    valid_hdr.crc32 = c;
+
+    noisy_stream.insert(noisy_stream.end(), reinterpret_cast<const uint8_t*>(&valid_hdr),
+                        reinterpret_cast<const uint8_t*>(&valid_hdr) + sizeof(valid_hdr));
+    noisy_stream.insert(noisy_stream.end(), reinterpret_cast<const uint8_t*>(&valid_payload),
+                        reinterpret_cast<const uint8_t*>(&valid_payload) + sizeof(valid_payload));
+
+    framer.push_data(noisy_stream);
+    size_t parsed = framer.parse_available();
+
+    assert(parsed == 1);
+    assert(valid_pose_received == 1);
+    std::cout << "  Passed: All 2,500 noise bytes, bad versions, and corrupt CRCs discarded; valid packet recovered.\n";
+}
+
 } // namespace
 
 int main() {
@@ -252,6 +333,7 @@ int main() {
     test_video_framer_corrupt_payload();
     test_video_framer_garbage_recovery();
     test_control_framer();
+    test_control_framer_garbage_and_bad_crc();
 
     std::cout << "All Framers unit tests passed successfully!\n";
     return 0;
